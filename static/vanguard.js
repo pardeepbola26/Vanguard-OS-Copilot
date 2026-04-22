@@ -11,6 +11,7 @@ let previousOutputsForDiff = null; // populated on refine to drive CHANGED badge
 // --- Output pane registry: maps stream event → output element + agent label ---
 const OUTPUT_PANES = {
     diagnostician:   { id: "diagnosisContent",    label: "Diagnostician" },
+    enright:         { id: "enrightContent",      label: "Enright (altitude)" },
     frameworks:      { id: "frameworksContent",   label: "Framework Agent" },
     structure:       { id: "structureContent",    label: "Structure Agent" },
     portfolio:       { id: "portfolioContent",    label: "Strategy Portfolio" },
@@ -619,14 +620,12 @@ async function handleStreamMessage(msg) {
         // Store market data to append after diagnosis
         window.currentMarketData = data;
     } else if (type === "diagnostician") {
-        // If we streamed deltas, the pane already has the running content; the final
-        // event just confirms completion. Only overwrite if we have no buffer.
-        if (!streamBuffers["diagnosisContent"] && $("diagnosisContent").innerText.trim() === "") {
-            updateContent("diagnosisContent", data);
-        }
+        // v2: diagnostician returns a structured dict. Prefer markdown field;
+        // fall back to memo_contribution or raw string.
+        const mdText = extractMarkdown(data);
+        updateContent("diagnosisContent", mdText);
         finalizeStream("diagnosisContent");
 
-        // Append market data if it exists
         if (window.currentMarketData) {
             const diagnosisEl = $("diagnosisContent");
             if (diagnosisEl) {
@@ -637,60 +636,168 @@ async function handleStreamMessage(msg) {
             }
         }
 
-        updateAgentStatus("Diagnosis Complete", 10);
+        updateAgentStatus("Diagnosis Complete", 8);
+    } else if (type === "enright") {
+        if (data && typeof data === "object" && !Array.isArray(data)) {
+            renderEnright(data);
+        } else {
+            updateContent("enrightContent", data);
+        }
+        updateAgentStatus("Altitude Located", 16);
     } else if (type === "frameworks") {
         if (data && typeof data === "object" && !Array.isArray(data)) {
             renderFrameworks(data);
         } else {
             updateContent("frameworksContent", data);
         }
-        updateAgentStatus("Frameworks Applied", 20);
+        updateAgentStatus("Frameworks Applied", 25);
     } else if (type === "structure") {
+        // v2 structure can be either: a legacy JSON string, or a dict with { nodes, edges, ... }
+        // In both cases renderCytoscapeDiagram handles it; for the text pane we
+        // prefer the markdown field when it's a dict.
         renderCytoscapeDiagram("mermaidContainer", data, "structureGraph");
-        updateContent("structureContent", JSON.stringify(data, null, 2));
-        updateAgentStatus("Decision Tree Built", 30);
+        if (data && typeof data === "object" && !Array.isArray(data)) {
+            updateContent("structureContent", extractMarkdown(data));
+        } else {
+            updateContent("structureContent", typeof data === "string" ? data : JSON.stringify(data, null, 2));
+        }
+        updateAgentStatus("Systems Analysis Complete", 35);
     } else if (type === "portfolio") {
-        updateContent("portfolioContent", data);
-        updateAgentStatus("Strategy Options Generated", 40);
+        updateContent("portfolioContent", extractMarkdown(data));
+        updateAgentStatus("Strategy Options Generated", 55);
     } else if (type === "drivers") {
         if (data && typeof data === "object" && !Array.isArray(data)) {
             renderMarketForces(data);
         } else {
             updateContent("marketForcesContent", data);
         }
-        updateAgentStatus("Market Analysis Complete", 40);
+        updateAgentStatus("Market Forces Mapped", 45);
     } else if (type === "financial") {
         if (data && typeof data === "object") {
             renderFinancials(data);
         } else {
             updateContent("financialsContent", data);
         }
-        updateAgentStatus("Financials Modeled", 50);
+        updateAgentStatus("Financials Modeled", 65);
     } else if (type === "ops") {
-        updateContent("opsContent", data);
-        updateAgentStatus("Ops Plan Designed", 60);
+        updateContent("opsContent", extractMarkdown(data));
+        updateAgentStatus("Ops Plan Designed", 75);
     } else if (type === "tech") {
-        updateContent("techContent", data);
+        updateContent("techContent", extractMarkdown(data));
     } else if (type === "human_factors") {
-        updateContent("humanContent", data);
-        updateAgentStatus("Tech & Human Factors Analyzed", 75);
+        updateContent("humanContent", extractMarkdown(data));
+        updateAgentStatus("Tech + Human Analyzed", 82);
     } else if (type === "red_team") {
-        updateContent("redTeamContent", data);
-        updateAgentStatus("Red Team Critique Received", 90);
+        updateContent("redTeamContent", extractMarkdown(data));
+        updateAgentStatus("Red Team Attack Complete", 92);
     } else if (type === "strategy_map") {
         const smc = $("strategyMapContainer");
         if (smc) smc.style.display = "block";
         renderCytoscapeDiagram("strategyMapContainer", data, "strategyMapGraph");
     } else if (type === "synthesizer") {
-        if (!streamBuffers["synthesizerContent"] && $("synthesizerContent").innerText.trim() === "") {
-            updateContent("synthesizerContent", data);
-        } else if (streamBuffers["synthesizerContent"]) {
-            // Final authoritative render (with normalized markdown) replaces the streaming buffer
-            updateContent("synthesizerContent", data);
-        }
+        // v2: synthesizer returns a dict with the_bet + quality gates + memo markdown.
+        // Use markdown if dict, else use as-is.
+        const mdText = extractMarkdown(data);
+        updateContent("synthesizerContent", mdText);
         finalizeStream("synthesizerContent");
+
+        // Quality-gate badge / flags — surface to operator if any failed
+        if (data && typeof data === "object") {
+            maybeShowSynthesizerFlags(data);
+        }
+
         updateAgentStatus("Strategy Synthesized", 100);
     }
+}
+
+// Extract a markdown string from an agent output that may be a dict or string.
+function extractMarkdown(data) {
+    if (data == null) return "";
+    if (typeof data === "string") return data;
+    if (typeof data === "object" && !Array.isArray(data)) {
+        return data.markdown || data.memo_contribution || JSON.stringify(data, null, 2);
+    }
+    return String(data);
+}
+
+function maybeShowSynthesizerFlags(synth) {
+    const flags = synth.flags_for_operator || [];
+    const host = $("synthesizerContent");
+    if (!host || !flags.length) return;
+    // Only show if not already rendered via markdown (the agent already writes
+    // a Flags section into its markdown).
+    if (/Flags for the Operator/i.test(host.innerText)) return;
+    const banner = document.createElement("div");
+    banner.className = "synthesizer-flag-banner";
+    banner.innerHTML = `<strong>⚠ Flags:</strong> <ul>${flags.map(f => `<li>${f}</li>`).join("")}</ul>`;
+    host.prepend(banner);
+}
+
+// ============================================================
+// Enright renderer — 5-level ladder + dominant badge + altitude insight callout
+// ============================================================
+function renderEnright(data) {
+    const host = $("enrightContent");
+    if (!host) return;
+
+    try { host.dataset.structured = JSON.stringify(data); } catch {}
+
+    const levelMeta = {
+        supranational: { title: "Supranational", accent: "var(--accent-secondary)" },
+        national:      { title: "National",      accent: "var(--accent-primary)" },
+        cluster:       { title: "Cluster",       accent: "var(--accent-warning)" },
+        industry:      { title: "Industry",      accent: "var(--accent-success)" },
+        firm:          { title: "Firm",          accent: "var(--text-primary)" },
+    };
+    const relevanceBadge = {
+        primary: `<span class="enright-rel-primary">PRIMARY</span>`,
+        secondary: `<span class="enright-rel-secondary">secondary</span>`,
+        contextual: `<span class="enright-rel-contextual">contextual</span>`,
+        not_applicable: `<span class="enright-rel-na">n/a</span>`,
+    };
+
+    const levels = Array.isArray(data.levels) ? data.levels : [];
+    const dominant = data.dominant_level || "";
+
+    const renderLevel = (lvl) => {
+        const meta = levelMeta[lvl.level] || { title: lvl.level, accent: "var(--accent-primary)" };
+        const isDom = lvl.level === dominant;
+        return `
+          <div class="enright-row ${isDom ? 'enright-dominant' : ''}" style="--level-color: ${meta.accent};">
+            <div class="enright-level-head">
+              <span class="enright-level-name">${meta.title}</span>
+              ${relevanceBadge[lvl.relevance] || ''}
+              ${isDom ? '<span class="enright-dominant-badge">DOMINANT</span>' : ''}
+            </div>
+            ${(lvl.key_dynamics && lvl.key_dynamics.length) ? `
+              <ul class="enright-dynamics">
+                ${lvl.key_dynamics.map(d => `<li>${d}</li>`).join("")}
+              </ul>
+            ` : ''}
+            ${lvl.strategic_implication ? `<div class="enright-impl"><strong>Implication:</strong> ${lvl.strategic_implication}</div>` : ''}
+            ${lvl.non_obvious_insight ? `<div class="enright-nonobvious"><strong>Non-obvious:</strong> ${lvl.non_obvious_insight}</div>` : ''}
+          </div>
+        `;
+    };
+
+    host.innerHTML = `
+      ${data.altitude_insight ? `
+        <div class="altitude-callout">
+          <div class="altitude-eyebrow">Altitude Insight</div>
+          <div class="altitude-body">${data.altitude_insight}</div>
+        </div>
+      ` : ''}
+      <div class="enright-ladder-v2">
+        ${levels.map(renderLevel).join("")}
+      </div>
+      ${(data.level_interactions && data.level_interactions.length) ? `
+        <div class="enright-interactions">
+          <div class="pane-eyebrow">Level Interactions</div>
+          <ul>${data.level_interactions.map(i => `<li>${i}</li>`).join("")}</ul>
+        </div>
+      ` : ''}
+      ${data.error ? `<div class="financials-error">${data.error}</div>` : ''}
+    `;
 }
 
 function renderFrameworks(data) {

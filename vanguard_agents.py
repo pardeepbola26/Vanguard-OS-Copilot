@@ -6,7 +6,8 @@
 import json
 import os
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Literal
+from enum import Enum
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -17,11 +18,112 @@ SEARCH_AVAILABLE = False
 load_dotenv()
 aclient = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+
+# ============================================================
+# v2 SHARED INFRASTRUCTURE — Vanguard OS architectural anchor
+# Enright (SPACE) + Porter (DYNAMICS) + Rumelt (EXECUTION)
+# ============================================================
+
+class EnrightLevel(str, Enum):
+    SUPRANATIONAL = "supranational"
+    NATIONAL = "national"
+    CLUSTER = "cluster"
+    INDUSTRY = "industry"
+    FIRM = "firm"
+
+
+# Typed shapes used inside agent outputs (JSON-compatible via dicts — we don't
+# enforce pydantic at runtime since OpenAI returns dicts, but the schemas
+# below are the contract prompts reference.)
+
+# Consideration — something worth the operator's reflection that isn't a
+# recommendation or a risk. Shape:
+#   { "consideration": str, "why_it_matters": str, "what_would_resolve_it": Optional[str] }
+
+# LoadBearingAssumption — must be true for strategy to work. Shape:
+#   { "assumption": str, "confidence": "high|medium|low", "if_wrong": str, "how_to_test": str }
+
+# TemporalSignal — when we'll know / when it's irreversible. Shape:
+#   { "claim": str, "time_to_signal": str, "time_to_irreversibility": Optional[str],
+#     "closing_window": Optional[str], "compounding_dynamic": Optional[str], "source_agent": str }
+
+
+UNIVERSAL_AGENT_PREAMBLE = """
+<role_anchor>
+You are an agent within Vanguard OS, a strategic reasoning system built on the synthesis of three intellectual traditions:
+- ENRIGHT's five-level framework (Supranational, National, Cluster, Industry, Firm) defines the strategic SPACE — where we're thinking.
+- PORTER's frameworks (Five Forces, Generic Strategies, Value Chain) characterize the competitive DYNAMICS — what forces are in play.
+- RUMELT's kernel (Diagnosis, Guiding Policy, Coherent Action) structures the EXECUTION — what we do about it.
+
+Every agent has a specific role within this architecture. Know yours.
+
+Your voice is that of a senior McKinsey partner who has done real operating work — sharp, intellectually honest, willing to make calls, able to say "I don't know" when genuinely uncertain, and allergic to consulting clichés. You have read Good Strategy / Bad Strategy three times. You understand that most strategy documents fail because they confuse goals with strategies, or restate constraints as choices.
+</role_anchor>
+
+<operating_principles>
+1. SHARP BEATS COMPLETE. One non-obvious insight that changes how the operator thinks beats four framework applications that confirm what they already knew.
+2. FALSIFIABILITY IS INTELLECTUAL HONESTY. Every claim must be accompanied by what would prove it wrong. Tentative language is allowed when reality is genuinely uncertain — but name WHAT makes it uncertain and WHAT would resolve it. Blanket hedging ("it may be worth exploring") is banned.
+3. NAME THE CRUX. Rumelt's test: can you state the single most important obstacle in one sentence? If you can't, you haven't diagnosed yet — you're still describing symptoms.
+4. CLIMB THE LEVELS. When analyzing competitive dynamics, consciously locate them at Enright's correct level. "Industry consolidation" at the industry level is different from "cluster erosion" at the cluster level. Specificity of altitude matters.
+5. TEMPORAL REASONING IS FIRST-CLASS. Every recommendation requires a clock. When will we know? When is this irreversible? Is there a closing window?
+6. IF YOU DISAGREE WITH UPSTREAM AGENTS, SAY SO. Write to the concerns field. Do not silently deviate.
+7. EARN YOUR OUTPUT. Before submitting, ask: would a McKinsey director let this out the door? If the answer is "it's fine" — revise. If the answer is "this sharpens the thinking" — submit.
+</operating_principles>
+"""
+
+
+# Forbidden phrases — the Synthesizer enforces these strictly, but they're
+# banned across the whole system. Keep banned patterns narrow to avoid
+# false-positive filtering.
+FORBIDDEN_PHRASES = [
+    "it may be worth considering",
+    "a variety of factors",
+    "leverage synergies",
+    "optimize operational efficiencies",
+    "in today's competitive landscape",
+    "going forward",
+]
+
+
 # ------------------------------------------------------------
 # Helper
 # ------------------------------------------------------------
 def normalize_markdown(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
     return text.replace("###", "##").replace("######", "###").strip()
+
+
+async def _llm_json(system: str, user: str, *, model: str = "gpt-4o",
+                    max_tokens: int = 2400, temperature: float = 0.4,
+                    timeout: float = 60.0) -> dict:
+    """
+    Call OpenAI with response_format=json_object, parse, and return a dict.
+    On parse failure, returns {"error": "...", "raw": "..."} so the caller can
+    degrade gracefully without hanging.
+    """
+    try:
+        response = await asyncio.wait_for(
+            aclient.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system + "\n\nReturn ONLY a JSON object. No prose outside the JSON."},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+            ),
+            timeout=timeout,
+        )
+        content = response.choices[0].message.content or "{}"
+        return json.loads(content)
+    except asyncio.TimeoutError:
+        return {"error": "timeout", "raw": ""}
+    except json.JSONDecodeError as je:
+        return {"error": f"json parse: {je}", "raw": content if "content" in locals() else ""}
+    except Exception as e:
+        return {"error": str(e), "raw": ""}
 
 
 async def _stream_chat(system: str, user: str, *, model: str = "gpt-4o",
@@ -59,86 +161,289 @@ async def _stream_chat(system: str, user: str, *, model: str = "gpt-4o",
 # ------------------------------------------------------------
 # AGENT 1: DIAGNOSTICIAN AGENT
 # ------------------------------------------------------------
-DIAGNOSTICIAN_SYSTEM = "You are the Diagnostician Agent. Identify the CRUX."
+DIAGNOSTICIAN_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Diagnostician. You own the Crux — the most important single sentence in the entire memo.
+
+Rumelt's insight: most strategies fail because they skip diagnosis. Executives jump from "here's the problem" (usually a symptom) to "here's the plan" without ever identifying the actual obstacle. Your job is to NOT do that. You separate:
+- What the operator thinks the problem is (presenting_problem)
+- What the problem actually is (structural_cause)
+- What the operator is likely underweighting (non_obvious_contributor)
+- Why it's acute now (why_now)
+- What the real external threat is (primary_external_threat)
+</your_role>
+"""
 
 
-def _diagnostician_prompt(situation: str, goal: str, constraints: str, document_context=None) -> str:
-    prompt = f"""
-You are the Diagnostician Agent for Vanguard OS, applying Rumelt's Good Strategy / Bad Strategy kernel.
+def _diagnostician_prompt_v1(situation: str, goal: str, constraints: str, document_context=None) -> str:
+    # Retained for streaming variant backwards compat — returns prose markdown only.
+    return _diagnostician_prompt(situation, goal, constraints, document_context)
 
-Your job is to identify the ONE critical obstacle blocking the goal. Not symptoms. Not wishes. The crux.
 
+def _diagnostician_prompt(situation: str, goal: str, constraints: str, document_context=None,
+                          key_numbers: str = "", success_metrics: str = "") -> str:
+    prompt = f"""<your_task>
+Produce a diagnosis. Your output is binding on every downstream agent.
+
+Before you write:
+1. Read the situation three times.
+2. Ask: what would a senior McKinsey partner say is genuinely non-obvious here?
+3. Ask: what does the operator think is the problem, and what evidence in the situation suggests they're wrong?
+4. Ask: why is this acute NOW? If the problem has existed for 18 months, what changed in the last 90 days?
+
+The structural_cause field is the hardest to get right. Test: if your structural_cause could apply to any firm in this industry, it's wrong. Rewrite until it names something specific to THIS firm's position.
+
+The why_now field forces temporal reasoning. "CAC has been climbing for 2 years but the board meeting is next month because Series B investors want to see Q1 CAC payback below 6 months" is a why_now. "CAC is high" is not.
+
+The problem_type classification is a forcing function. Be willing to commit.
+
+The crux_sentence is the sentence the operator will repeat in their next board meeting. A strong crux_sentence:
+- Names the real obstacle in under 25 words
+- Is falsifiable (you could imagine being wrong)
+- Is specific to this situation
+- Points toward a type of solution without prescribing it
+</your_task>
+
+<voice_guidance>
+Avoid:
+- "It may be worth considering..." (commit or don't)
+- "A variety of factors contribute..." (name them)
+- "The company should focus on..." (you're the Diagnostician, not the recommender)
+
+Use:
+- "The operator reads this as X, but the evidence suggests Y, because Z."
+- "This is acute now because [specific recent change]."
+- "The non-obvious contributor is [specific factor] — most operators in this position underweight it because [specific reason]."
+</voice_guidance>
+
+<input_context>
 Situation: {situation}
 Goal: {goal}
+Key Numbers: {key_numbers}
 Constraints: {constraints}
+Success Metrics: {success_metrics}
+</input_context>
 """
     if document_context:
-        prompt += f"\nCONTEXT:\n{document_context[:5000]}\n"
+        prompt += f"\n<document_context>\n{document_context[:5000]}\n</document_context>\n"
 
     prompt += """
-Rules:
-- Rumelt distinction: a CRUX is the obstacle that, if removed, makes the goal achievable. Not "what is bad."
-- Reject vague or multi-headed diagnoses. One crux. One sentence.
-- **You MUST name and reject 2 plausible WRONG diagnoses.** This prevents first-plausible-answer bias.
-- Root causes must be MECE (mutually exclusive, collectively exhaustive). 3-5 of them.
-- End with an explicit confidence score (0-100) based on evidence strength.
-
-Output format (markdown):
-
-## CRUX
-<Single sentence. If removed, goal becomes achievable.>
-
-## Why not [Alternative Diagnosis A]
-<One-sentence plausible alternative diagnosis, then 1-2 sentences on why it's a symptom, not the crux.>
-
-## Why not [Alternative Diagnosis B]
-<Same pattern — a different plausible wrong answer, rejected with reasoning.>
-
-## Root Causes (MECE)
-- Cause 1
-- Cause 2
-- Cause 3
-(3-5 total)
-
-## Binding Constraints
-<The 2-3 constraints that actually shape strategy — not a laundry list.>
-
-## Confidence
-<0-100>  — <one sentence naming the biggest source of uncertainty>
+Return JSON matching this schema (all fields required unless marked optional):
+{
+  "crux_sentence": "string, MAX 25 words. The one sentence the CEO will repeat.",
+  "presenting_problem": "string — what the operator currently thinks the problem is",
+  "structural_cause": "string — the underlying regime-change that makes this not a cyclical blip. SPECIFIC to this firm, not the industry.",
+  "non_obvious_contributor": "string — something the operator is underweighting",
+  "why_now": "string — why this is acute at THIS moment. Name the specific recent change.",
+  "primary_external_threat": "string — the single most dangerous external force",
+  "problem_type": "execution|strategy|positioning|capability|temporal|composite",
+  "dominant_if_composite": "string or null",
+  "load_bearing_assumptions": [
+    {"assumption": "string", "confidence": "high|medium|low", "if_wrong": "string", "how_to_test": "string"}
+  ],
+  "memo_contribution": "string — the exact 2-3 sentences the Synthesizer will use for the Crux section of the memo. Must open with the crux_sentence, then give structural_cause + why_now in one or two sentences.",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
+}
 """
     return prompt
 
 
-async def diagnostician_agent_stream(situation: str, goal: str, constraints: str, document_context=None):
-    """Streaming variant — yields text deltas. Caller concatenates for the full crux."""
-    prompt = _diagnostician_prompt(situation, goal, constraints, document_context)
-    # temp 0.3 — diagnosis wants accuracy, not creativity
-    async for delta in _stream_chat(DIAGNOSTICIAN_SYSTEM, prompt, max_tokens=1200, temperature=0.3, timeout=45.0):
-        yield delta
+async def diagnostician_agent(situation: str, goal: str, constraints: str,
+                              document_context=None, key_numbers: str = "",
+                              success_metrics: str = "") -> dict:
+    """v2 Diagnostician — structured output with crux_sentence, structural_cause,
+    non_obvious_contributor, why_now, primary_external_threat, problem_type,
+    load_bearing_assumptions, memo_contribution. Returns a dict.
+    """
+    prompt = _diagnostician_prompt(situation, goal, constraints, document_context,
+                                    key_numbers, success_metrics)
+    data = await _llm_json(DIAGNOSTICIAN_SYSTEM, prompt, max_tokens=2000,
+                           temperature=0.3, timeout=60.0)
 
+    if data.get("error"):
+        # Degrade gracefully — surface the error in memo_contribution
+        return {
+            "error": data.get("error"),
+            "crux_sentence": "Diagnosis unavailable — agent error.",
+            "memo_contribution": f"Diagnostician error: {data.get('error')}",
+            "markdown": f"## Diagnosis Error\n\n{data.get('error')}",
+            "problem_type": "composite",
+            "load_bearing_assumptions": [],
+            "considerations": [],
+            "concerns": [f"Diagnostician failed: {data.get('error')}"],
+        }
 
-async def diagnostician_agent(situation: str, goal: str, constraints: str, document_context=None):
-    prompt = _diagnostician_prompt(situation, goal, constraints, document_context)
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": DIAGNOSTICIAN_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1200,
-                temperature=0.3
-            ),
-            timeout=45.0
-        )
-        return normalize_markdown(response.choices[0].message.content)
-    except Exception as e:
-        print(f"ERROR in diagnostician_agent: {e}")
-        return f"Error: {str(e)}"
+    # Render markdown view for legacy consumers + UI fallback rendering
+    md_parts = []
+    if data.get("crux_sentence"):
+        md_parts.append(f"## Crux\n\n**{data['crux_sentence']}**")
+    if data.get("structural_cause"):
+        md_parts.append(f"## Structural Cause\n\n{data['structural_cause']}")
+    if data.get("presenting_problem"):
+        md_parts.append(f"## Presenting Problem\n\n{data['presenting_problem']}")
+    if data.get("non_obvious_contributor"):
+        md_parts.append(f"## Non-obvious Contributor\n\n{data['non_obvious_contributor']}")
+    if data.get("why_now"):
+        md_parts.append(f"## Why Now\n\n{data['why_now']}")
+    if data.get("primary_external_threat"):
+        md_parts.append(f"## Primary External Threat\n\n{data['primary_external_threat']}")
+    if data.get("problem_type"):
+        pt = data["problem_type"]
+        if data.get("dominant_if_composite"):
+            pt += f" (dominant: {data['dominant_if_composite']})"
+        md_parts.append(f"## Problem Type\n\n`{pt}`")
+    if data.get("load_bearing_assumptions"):
+        md_parts.append("## Load-Bearing Assumptions")
+        for lba in data["load_bearing_assumptions"]:
+            conf = lba.get("confidence", "?")
+            md_parts.append(
+                f"- **{lba.get('assumption', '')}** "
+                f"_(confidence: {conf})_  \n"
+                f"  If wrong: {lba.get('if_wrong', '')}  \n"
+                f"  How to test: {lba.get('how_to_test', '')}"
+            )
+
+    data["markdown"] = normalize_markdown("\n\n".join(md_parts))
+    return data
 
 # ------------------------------------------------------------
-# AGENT 1.5: FRAMEWORK AGENT (Enright)
+# AGENT 1.4: ENRIGHT AGENT (NEW — owns strategic SPACE / altitude)
+# ------------------------------------------------------------
+ENRIGHT_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Enright Agent. Your job is to locate the strategic problem at the correct altitude.
+
+Most strategy work fails by analyzing at the wrong level. A firm-level margin problem might actually be a cluster-level commoditization. An industry-level competitive threat might be a supranational-level regulatory shift disguised as competition. You climb the five levels consciously and name where the real action is.
+
+The five levels, from highest to lowest altitude:
+SUPRANATIONAL: Forces above the nation-state. Global capital flows, trade blocs, technology diffusion, climate/demographic megatrends, geopolitical realignment.
+NATIONAL: Country-specific dynamics. Regulatory regimes, macro policy, domestic competitive landscape, national talent pools, currency, political stability.
+CLUSTER: Geographic or sector-adjacent concentrations that share inputs, labor, knowledge spillovers. A cluster has its own gravity independent of the industry.
+INDUSTRY: The industry structure in Porter's sense. Five Forces, strategic groups, industry life cycle, entry barriers.
+FIRM: Company-specific. Capabilities, positioning, resources, leadership, culture, operational state.
+</your_role>
+"""
+
+
+async def enright_agent(situation: str, goal: str, constraints: str = "",
+                         key_numbers: str = "", success_metrics: str = "",
+                         document_context=None) -> dict:
+    """Enright altitude analysis. Runs in parallel with Frameworks + Structure + Market Forces.
+    Its dominant_level and memo_contribution feed Portfolio and Synthesizer.
+    """
+    prompt = f"""<your_task>
+Analyze the situation across all five Enright levels. For each level:
+1. Mark its relevance (primary/secondary/contextual/not_applicable)
+2. Name 2-4 specific dynamics operating at that level for THIS situation
+3. State the strategic implication for the firm
+4. If there's something non-obvious at this level, name it
+
+Then:
+- Identify the DOMINANT LEVEL — where the real strategic action is
+- Name 2-3 LEVEL INTERACTIONS — how dynamics cascade between levels
+- Produce ONE ALTITUDE INSIGHT — the sharpest thing climbing the levels revealed
+
+Your altitude_insight is the output that justifies this agent's existence. It should be a claim the operator would not have generated by staying at the firm or industry level alone.
+</your_task>
+
+<output_requirements>
+- Mark at LEAST one level "not_applicable" if it genuinely is. Don't fake relevance at every level.
+- The dominant_level is usually NOT the firm level. If you land on firm as dominant, audit yourself: is that because firm is actually dominant, or because you didn't climb hard enough?
+- The altitude_insight must be specific to this situation. If you can't write one that would change how the operator thinks, write to concerns: "Nothing non-obvious emerged from climbing the levels for this situation."
+</output_requirements>
+
+<input_context>
+Situation: {situation}
+Goal: {goal}
+Key Numbers: {key_numbers}
+Constraints: {constraints}
+Success Metrics: {success_metrics}
+</input_context>
+"""
+    if document_context:
+        prompt += f"\n<document_context>\n{document_context[:5000]}\n</document_context>\n"
+
+    prompt += """
+Return JSON matching this schema:
+{
+  "levels": [
+    {
+      "level": "supranational|national|cluster|industry|firm",
+      "relevance": "primary|secondary|contextual|not_applicable",
+      "key_dynamics": ["string", "string"],
+      "strategic_implication": "string",
+      "non_obvious_insight": "string or null"
+    }
+    // ALL 5 levels, in order
+  ],
+  "dominant_level": "supranational|national|cluster|industry|firm",
+  "level_interactions": ["string describing how dynamics cascade between levels", "string", "string"],
+  "altitude_insight": "string — the sharpest single claim from climbing the levels. Must be specific.",
+  "memo_contribution": "string — 3-4 sentences the Synthesizer will use for the Strategic Framing section.",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
+}
+"""
+
+    data = await _llm_json(ENRIGHT_SYSTEM, prompt, max_tokens=2400,
+                           temperature=0.4, timeout=60.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "dominant_level": "industry",
+            "altitude_insight": "Enright analysis unavailable.",
+            "memo_contribution": f"Enright agent error: {data['error']}",
+            "markdown": f"## Enright Error\n\n{data['error']}",
+            "levels": [],
+            "level_interactions": [],
+            "considerations": [],
+            "concerns": [f"Enright failed: {data['error']}"],
+        }
+
+    # Markdown render for legacy consumers + fallback UI
+    md = []
+    level_labels = {
+        "supranational": "Supranational (global forces)",
+        "national": "National (country dynamics)",
+        "cluster": "Cluster (regional/sector concentration)",
+        "industry": "Industry (Porter structure)",
+        "firm": "Firm (capabilities/positioning)",
+    }
+    relevance_mark = {
+        "primary": "🔴 PRIMARY",
+        "secondary": "🟠 secondary",
+        "contextual": "· contextual",
+        "not_applicable": "—",
+    }
+
+    if data.get("dominant_level"):
+        md.append(f"**Dominant level:** `{data['dominant_level'].upper()}`")
+    if data.get("altitude_insight"):
+        md.append(f"\n## Altitude Insight\n\n{data['altitude_insight']}")
+    if data.get("levels"):
+        md.append("\n## Level-by-Level")
+        for lvl in data["levels"]:
+            label = level_labels.get(lvl.get("level"), lvl.get("level", "?"))
+            mark = relevance_mark.get(lvl.get("relevance", ""), lvl.get("relevance", ""))
+            md.append(f"\n### {label}  \n_{mark}_")
+            for dyn in (lvl.get("key_dynamics") or []):
+                md.append(f"- {dyn}")
+            if lvl.get("strategic_implication"):
+                md.append(f"\n**Implication:** {lvl['strategic_implication']}")
+            if lvl.get("non_obvious_insight"):
+                md.append(f"\n**Non-obvious:** {lvl['non_obvious_insight']}")
+    if data.get("level_interactions"):
+        md.append("\n## Cascading Interactions")
+        for inter in data["level_interactions"]:
+            md.append(f"- {inter}")
+
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
+
+
+# ------------------------------------------------------------
+# AGENT 1.5: FRAMEWORK AGENT (Meta-level selector per v2 spec)
 # ------------------------------------------------------------
 async def framework_agent(situation: str, goal: str, frameworks: list = None, document_context=None):
     """
@@ -152,114 +457,250 @@ async def framework_agent(situation: str, goal: str, frameworks: list = None, do
     if frameworks:
         user_hint = f"\nThe user suggested these frameworks (use them if truly relevant, otherwise replace with better fits): {', '.join(frameworks)}\n"
 
-    prompt = f"""
-You are the Framework Agent. Apply strategic frameworks with precision.
+    system = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Frameworks Agent. Your job is to select the 2-3 analytical lenses that genuinely illuminate THIS situation, and explain what each reveals.
 
+Most strategy work fails by applying frameworks as templates rather than tools. A framework applied as a template produces checkbox analysis. A framework applied as a tool produces insight.
+
+Your role is the tool-user, not the template-applier. Enright's 5-level framework is owned by the Enright Agent — reference it but don't duplicate.
+
+Toolkit you can draw from:
+- Porter: Five Forces, Generic Strategies, Value Chain, Diamond Model
+- Rumelt: Kernel, Bad Strategy patterns
+- Christensen: Jobs-to-be-Done, Disruption Theory, Capabilities/Resources/Priorities
+- Wardley: Value-chain mapping, evolution axis
+- Kim & Mauborgne: Blue Ocean, Strategy Canvas
+- McKinsey: 7S, Three Horizons
+- BCG: Growth-Share Matrix, Experience Curve
+- Hamel & Prahalad: Core Competencies
+- Teece: Dynamic Capabilities
+- Barney: Resource-Based View / VRIN
+- Kahneman/Tversky: Cognitive biases relevant to strategic decisions
+- Taleb: Antifragility, barbell strategy, optionality
+</your_role>
+"""
+
+    prompt = f"""<your_task>
+Select EXACTLY 2-3 frameworks. Not 1. Not 5. The discipline is forcing yourself to pick the few that matter most.
+
+For each selected framework:
+1. Name the framework and its category
+2. Argue WHY this framework for THIS situation (not generically — specifically)
+3. Apply the framework to the situation with specificity
+4. Extract the SHARPEST INSIGHT — the thing the framework reveals that a thoughtful generalist would miss
+5. Acknowledge WHAT IT MISSES — every framework has blind spots; name them here
+6. Locate it at an Enright level
+
+Also produce:
+- At least 2 frameworks you REJECTED with brief reasons (forces deliberate selection)
+- Optionally: a cross_framework_insight — something that emerges only when you combine the selected lenses
+
+Before finalizing, ask: could my sharpest_insight sections appear in a generic consulting deck? If yes, I haven't applied the framework hard enough.
+</your_task>
+
+<input_context>
 Situation: {situation}
 Goal: {goal}
 {user_hint}
+</input_context>
 """
     if document_context:
-        prompt += f"\n**CONTEXT FROM UPLOADED DOCUMENT:**\n{document_context[:8000]}\n\nGround analysis in real company data.\n"
+        prompt += f"\n<document_context>\n{document_context[:6000]}\n</document_context>\n"
 
     prompt += """
-Your task:
-
-1) **Enright's 5 Levels of Strategy** — always include. Give 1-2 bullet points per level:
-   - Supranational · National · Cluster · Industry · Firm
-
-2) **Select 2-3 additional frameworks** that best fit THIS problem from:
-   SWOT · PESTEL · Value Chain · Porter Five Forces · Blue Ocean · 7 Powers · Jobs to be Done · BCG Matrix · Ansoff Matrix
-
-   For each chosen framework, explicitly state WHY you chose it in one sentence before applying it. Do NOT apply all frameworks — fit beats breadth.
-
-3) Return a single JSON object with the following shape. Output ONLY the JSON, no markdown fences:
-
+Return JSON matching this schema:
 {
-  "enright": {
-    "supranational": "<2-3 bullets as a single paragraph>",
-    "national": "...",
-    "cluster": "...",
-    "industry": "...",
-    "firm": "..."
-  },
   "selected_frameworks": [
     {
-      "name": "<e.g., Porter Five Forces>",
-      "why_chosen": "<one sentence justifying relevance to this problem>",
-      "analysis": "<concise markdown analysis — bullets or short paragraphs>"
+      "name": "string (e.g., 'Christensen Jobs-to-be-Done')",
+      "category": "competitive|positioning|operational|cognitive|temporal",
+      "why_this_framework": "string — why THIS framework for THIS situation",
+      "application": "string — how the framework maps. Specific, not textbook.",
+      "sharpest_insight": "string — what this framework reveals that wasn't obvious",
+      "what_it_misses": "string — honest acknowledgment of where this framework fails here",
+      "enright_level": "supranational|national|cluster|industry|firm"
     }
-    // 2-3 entries total
+    // 2-3 entries
   ],
-  "confidence": <0-100 integer>
+  "frameworks_considered_and_rejected": [
+    {"name": "string", "why_rejected": "string under 40 words"}
+    // at least 2
+  ],
+  "cross_framework_insight": "string or null — insight that only emerges from combining the selected frameworks",
+  "memo_contribution": "string — 2-3 sentences the Synthesizer can use",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
 }
 """
 
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the Framework Agent. Return ONLY valid JSON. Select frameworks by fit, not breadth."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=2500,
-                temperature=0.4
-            ),
-            timeout=60.0
-        )
-        content = response.choices[0].message.content
-        content = content.replace("```json", "").replace("```", "").strip()
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError as je:
-            print(f"JSON Parse Error in framework_agent: {je}")
-            return {
-                "error": f"JSON parse failed: {je}",
-                "markdown": normalize_markdown(content),
-                "enright": {},
-                "selected_frameworks": [],
-                "confidence": None,
-            }
-
-        # Build markdown rendering for downstream agents that still consume text
-        md_lines = ["## Enright's 5 Levels"]
-        en = data.get("enright") or {}
-        for level_key, level_title in [
-            ("supranational", "Supranational"),
-            ("national", "National"),
-            ("cluster", "Cluster"),
-            ("industry", "Industry"),
-            ("firm", "Firm"),
-        ]:
-            if en.get(level_key):
-                md_lines.append(f"**{level_title}** — {en[level_key]}")
-
-        md_lines.append("")
-        md_lines.append("## Selected Frameworks")
-        for fw in (data.get("selected_frameworks") or []):
-            md_lines.append(f"### {fw.get('name', 'Framework')}")
-            md_lines.append(f"_Why chosen:_ {fw.get('why_chosen', '')}")
-            md_lines.append(fw.get("analysis", ""))
-            md_lines.append("")
-
-        data["markdown"] = normalize_markdown("\n".join(md_lines))
-        return data
-
-    except Exception as e:
-        print(f"ERROR in framework_agent: {e}")
+    data = await _llm_json(system, prompt, max_tokens=2800, temperature=0.4, timeout=60.0)
+    if data.get("error"):
         return {
-            "error": str(e),
-            "markdown": f"Error: {e}",
-            "enright": {},
+            "error": data["error"],
             "selected_frameworks": [],
-            "confidence": None,
+            "frameworks_considered_and_rejected": [],
+            "memo_contribution": f"Frameworks agent error: {data['error']}",
+            "markdown": f"## Frameworks Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Frameworks failed: {data['error']}"],
         }
 
+    md = []
+    for fw in (data.get("selected_frameworks") or []):
+        md.append(f"## {fw.get('name', 'Framework')}")
+        if fw.get("why_this_framework"):
+            md.append(f"_Why this framework:_ {fw['why_this_framework']}")
+        if fw.get("application"):
+            md.append(fw["application"])
+        if fw.get("sharpest_insight"):
+            md.append(f"\n**Sharpest insight:** {fw['sharpest_insight']}")
+        if fw.get("what_it_misses"):
+            md.append(f"\n**What it misses:** {fw['what_it_misses']}")
+        md.append("")
+    rejected = data.get("frameworks_considered_and_rejected") or []
+    if rejected:
+        md.append("## Considered and Rejected")
+        for r in rejected:
+            md.append(f"- **{r.get('name', '?')}** — {r.get('why_rejected', '')}")
+    if data.get("cross_framework_insight"):
+        md.append(f"\n## Cross-Framework Insight\n\n{data['cross_framework_insight']}")
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
+
 # ------------------------------------------------------------
-# AGENT 1.8: STRUCTURE AGENT (Decision Tree)
+# AGENT 1.8: STRUCTURE AGENT (v2 — Systems analyst + decision tree)
 # ------------------------------------------------------------
-async def structure_agent(situation: str, goal: str, constraints: str):
+STRUCTURE_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Structure Agent. You see the problem as a SYSTEM — dependencies, feedback loops, bottlenecks, leverage points.
+
+Most strategic analysis treats a firm's situation as a list of issues. You treat it as a causal graph. You identify:
+1. What KIND of problem this is (most operators misdiagnose)
+2. The critical DEPENDENCY CHAIN (what must happen in what order)
+3. The FEEDBACK LOOPS currently shaping the firm's trajectory
+4. The STRUCTURAL BOTTLENECK — the one constraint that, if removed, changes everything
+5. Any HIDDEN LEVERAGE — points in the system where small changes produce large effects
+
+You are channeling Donella Meadows meets Eli Goldratt. You think in stocks and flows, in reinforcing and balancing loops, in constraints and throughput.
+
+Problem type definitions:
+EXECUTION: Strategy is right for environment, firm is failing to deliver. Fix: better operations.
+STRATEGY: Strategy itself is wrong for environment. Fix: re-strategize. Execution won't save you.
+POSITIONING: Firm's market position has structurally shifted. Fix: reposition.
+CAPABILITY: Firm lacks a capability required for ANY viable strategy. Fix: build/buy/partner.
+TEMPORAL: Moves are right but timing is wrong. Fix: sequencing.
+IDENTITY: Firm has lost coherence about what it is. Fix: forced clarity.
+COMPOSITE: Multiple of the above. If composite, name the DOMINANT one.
+</your_role>
+"""
+
+
+async def structure_agent(situation: str, goal: str, constraints: str,
+                           document_context=None, key_numbers: str = "") -> dict:
+    prompt = f"""<your_task>
+Classify the problem type and justify with specific evidence. Then trace the system.
+
+CRITICAL DEPENDENCY CHAIN: What must happen in what order for ANY strategy to succeed here?
+FEEDBACK LOOPS: Identify 2-4 loops currently shaping the firm's trajectory. For each: reinforcing or balancing? accelerating / stable / weakening / broken? what would break it?
+STRUCTURAL BOTTLENECK: Goldratt's Theory of Constraints — name the one binding constraint.
+HIDDEN LEVERAGE: Meadows' leverage points — places in the system where small changes produce large effects. Often counterintuitive.
+
+Also generate a 4-level DECISION TREE as a Cytoscape.js graph: Goal → 3-4 Drivers → 2-3 Sub-drivers each → Actions (leaves). Used by the frontend Decision Tree tab. Nodes include type (root/branch/leaf), roi (0-10 for leaves), confidence (0-100). Edges include weight (1-10 impact).
+</your_task>
+
+<input_context>
+Situation: {situation}
+Goal: {goal}
+Key Numbers: {key_numbers}
+Constraints: {constraints}
+</input_context>
+
+Return JSON matching this schema:
+{{
+  "problem_type": "execution_problem|strategy_problem|positioning_problem|capability_problem|temporal_problem|identity_problem|composite",
+  "dominant_if_composite": "string or null",
+  "problem_type_evidence": "string — specific evidence for the classification",
+  "critical_dependency_chain": ["string ordered step", "string ordered step"],
+  "feedback_loops": [
+    {{
+      "loop_description": "string",
+      "loop_type": "reinforcing|balancing",
+      "current_state": "accelerating|stable|weakening|broken",
+      "break_point": "string or null",
+      "strategic_implication": "string"
+    }}
+  ],
+  "structural_bottleneck": "string",
+  "hidden_leverage": "string or null",
+  "tree": {{
+    "nodes": [
+      {{"data": {{"id": "goal", "label": "short label", "type": "root", "confidence": 80}}}}
+    ],
+    "edges": [
+      {{"data": {{"source": "goal", "target": "d1", "weight": 8}}}}
+    ]
+  }},
+  "memo_contribution": "string — 2-3 sentences the Synthesizer can use",
+  "considerations": [{{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}}],
+  "concerns": ["string"]
+}}
+"""
+    if document_context:
+        prompt += f"\n<document_context>\n{document_context[:5000]}\n</document_context>\n"
+
+    data = await _llm_json(STRUCTURE_SYSTEM, prompt, max_tokens=3200,
+                           temperature=0.3, timeout=75.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "problem_type": "composite",
+            "tree": {"nodes": [{"data": {"id": "error", "label": "Structure error", "type": "root"}}], "edges": []},
+            "memo_contribution": f"Structure agent error: {data['error']}",
+            "markdown": f"## Structure Error\n\n{data['error']}",
+            "feedback_loops": [],
+            "considerations": [],
+            "concerns": [f"Structure failed: {data['error']}"],
+        }
+
+    # Legacy frontend compatibility: expose tree at top level too, as JSON STRING
+    # so renderCytoscapeDiagram (which accepts string or object) works.
+    tree = data.get("tree") or {}
+    if isinstance(tree, dict):
+        data["nodes"] = tree.get("nodes", [])
+        data["edges"] = tree.get("edges", [])
+
+    md = []
+    if data.get("problem_type"):
+        pt = data["problem_type"]
+        if data.get("dominant_if_composite"):
+            pt += f" (dominant: {data['dominant_if_composite']})"
+        md.append(f"**Problem type:** `{pt}`")
+    if data.get("problem_type_evidence"):
+        md.append(f"\n{data['problem_type_evidence']}")
+    if data.get("structural_bottleneck"):
+        md.append(f"\n## Structural Bottleneck\n\n{data['structural_bottleneck']}")
+    if data.get("hidden_leverage"):
+        md.append(f"\n## Hidden Leverage\n\n{data['hidden_leverage']}")
+    if data.get("critical_dependency_chain"):
+        md.append("\n## Critical Dependency Chain")
+        for i, step in enumerate(data["critical_dependency_chain"], 1):
+            md.append(f"{i}. {step}")
+    if data.get("feedback_loops"):
+        md.append("\n## Feedback Loops")
+        for loop in data["feedback_loops"]:
+            md.append(
+                f"- **{loop.get('loop_description', '')}** "
+                f"_{loop.get('loop_type', '?')}, {loop.get('current_state', '?')}_  \n"
+                f"  Break point: {loop.get('break_point', 'n/a')}  \n"
+                f"  Implication: {loop.get('strategic_implication', '')}"
+            )
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
+
+
+# Legacy Cytoscape-only entrypoint preserved in case any caller needs it.
+async def structure_agent_legacy(situation: str, goal: str, constraints: str):
     prompt = f"""Create a weighted decision tree as JSON for Cytoscape.js.
 
 Situation: {situation}
@@ -445,262 +886,356 @@ async def market_data_agent(situation: str, goal: str):
 # ------------------------------------------------------------
 # AGENT 2: DRIVERS / MARKET FORCES AGENT
 # ------------------------------------------------------------
-async def market_forces_agent(crux_output: str, document_context=None):
-    """Porter-style forces with structured 1-5 scores and explicit ranking.
-    Returns a dict with 'forces', 'most_determinative', 'markdown', 'confidence'.
-    """
-    prompt = f"""
-You are the Market Forces & Drivers Agent for Vanguard OS.
-Pressure-test the crux using Porter's Five Forces extended with Complementors.
+MARKET_FORCES_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Market Forces Agent. You own Porter's competitive analysis.
 
-Crux Analysis:
-{crux_output}
+Your role in the intellectual architecture: Enright tells us WHAT LEVEL we're thinking at; you characterize the DYNAMICS operating within the industry level (and sometimes cluster level). Porter's frameworks are tools — you use them, not recite them.
+
+You analyze:
+1. The Five Forces with intensity (1-5), trajectory (intensifying/stable/weakening), and time horizon
+2. Which forces are MOST DETERMINATIVE for strategy (not all forces matter equally in every industry)
+3. The firm's current generic-strategy posture (cost leader / differentiator / focuser / stuck in middle)
+4. Strategic group structure and where the firm sits within it
+5. Temporal dynamics — how will forces shift over the next 18-24 months?
+6. Industry profit pool shifts — where is value migrating?
+</your_role>
+"""
+
+
+async def market_forces_agent(crux_output: str, document_context=None,
+                               enright_output: Optional[dict] = None,
+                               situation: str = "") -> dict:
+    """v2 Market Forces — Porter dynamics with temporal trajectory + strategic groups.
+    Returns a dict with structured forces + memo_contribution + markdown.
+    """
+    enright_summary = ""
+    if enright_output and isinstance(enright_output, dict) and not enright_output.get("error"):
+        enright_summary = (
+            f"Enright dominant level: {enright_output.get('dominant_level', '?')}. "
+            f"Altitude insight: {enright_output.get('altitude_insight', '')}"
+        )
+
+    prompt = f"""<your_task>
+Analyze all Five Forces. For each:
+- Rate intensity 1-5 with specific evidence from THIS situation
+- Rate trajectory (intensifying/stable/weakening) and over what time horizon
+- Name the implication for strategy
+
+CRITICAL: Forces are not equal. Name the MOST_DETERMINATIVE and SECONDARY_DETERMINATIVE. Do not treat all five as equally important.
+
+GENERIC STRATEGY: Where is this firm? Be willing to call "stuck_in_middle" when warranted.
+STRATEGIC GROUPS: Map the competitive landscape. Where does the firm sit?
+TEMPORAL DYNAMICS: How will forces shift over 18-24 months?
+PROFIT POOL SHIFT: Where is value migrating?
+</your_task>
+
+<input_context>
+Situation: {situation}
+Crux: {crux_output}
+{enright_summary}
+</input_context>
 """
     if document_context:
-        prompt += f"\n**DOCUMENT CONTEXT:**\n{document_context[:7000]}\n\nGround your analysis in real data.\n"
+        prompt += f"\n<document_context>\n{document_context[:6000]}\n</document_context>\n"
 
     prompt += """
-For each force, give:
-- `intensity` on a 1-5 scale (1 = favorable to incumbent, 5 = severe threat)
-- `direction`: "worsening" | "stable" | "improving" (next 24 months)
-- `note`: one sentence with the dominant mechanism
-- `impact_on_crux`: "amplifies" | "mitigates" | "neutral"
-
-The six forces to score:
-  1. Threat of New Entrants
-  2. Bargaining Power of Suppliers
-  3. Bargaining Power of Buyers
-  4. Threat of Substitutes
-  5. Competitive Rivalry
-  6. Complementors
-
-Then name the SINGLE most determinative force with a short rationale.
-
-Return ONLY this JSON (no markdown fences):
-
+Return JSON matching this schema:
 {
   "forces": [
-    {"name": "New Entrants", "intensity": 1-5, "direction": "...", "note": "...", "impact_on_crux": "..."},
-    {"name": "Supplier Power", ...},
-    {"name": "Buyer Power", ...},
-    {"name": "Substitutes", ...},
-    {"name": "Competitive Rivalry", ...},
-    {"name": "Complementors", ...}
+    {
+      "name": "threat_of_new_entrants|bargaining_power_of_suppliers|bargaining_power_of_buyers|threat_of_substitutes|rivalry_among_competitors",
+      "intensity": 1,
+      "intensity_trajectory": "intensifying|stable|weakening",
+      "time_horizon": "string — over what period is this assessment valid",
+      "specific_evidence": "string — evidence from THIS situation, not generic",
+      "implication": "string"
+    }
+    // EXACTLY 5 forces
   ],
-  "most_determinative": {"force": "...", "why": "..."},
-  "implications": "<1-2 sentences on what this means for guiding policy>",
-  "confidence": <0-100 integer>
+  "most_determinative": "string — name which force shapes strategy most",
+  "secondary_determinative": "string",
+  "generic_strategy_assessment": "cost_leadership|differentiation|focus_cost|focus_differentiation|stuck_in_middle|unclear",
+  "stuck_in_middle_risk": "string — is the firm drifting toward stuck-in-middle? If yes, why?",
+  "strategic_groups": [
+    {
+      "group_name": "string",
+      "members": ["string"],
+      "positioning_axes": {"axis_name": "axis_value"},
+      "firm_membership": "in_group|adjacent|not_in_group|caught_between_groups"
+    }
+  ],
+  "temporal_dynamics": "string — how forces will shift over 18-24 months",
+  "industry_profit_pool_shift": "string or null — where is value migrating",
+  "memo_contribution": "string — 2-3 sentences for the Synthesizer",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
 }
 """
 
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the Market Forces Agent. Return ONLY valid JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1400,
-                temperature=0.4
-            ),
-            timeout=45.0
-        )
-        content = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError as je:
-            print(f"JSON Parse Error in market_forces_agent: {je}")
-            return {
-                "error": f"JSON parse failed: {je}",
-                "markdown": normalize_markdown(content),
-                "forces": [],
-                "most_determinative": None,
-                "confidence": None,
-            }
-
-        # Build markdown for downstream agents
-        md = ["## Market Forces", ""]
-        for f in (data.get("forces") or []):
-            arrow = {"worsening": "↑", "improving": "↓", "stable": "→"}.get(f.get("direction", ""), "·")
-            md.append(f"- **{f.get('name', '?')}** ({f.get('intensity', '?')}/5 {arrow}) — {f.get('note', '')}")
-        md.append("")
-        mdet = data.get("most_determinative") or {}
-        if mdet.get("force"):
-            md.append(f"**Most determinative force:** {mdet['force']} — {mdet.get('why','')}")
-        if data.get("implications"):
-            md.append("")
-            md.append(f"**Implications:** {data['implications']}")
-
-        data["markdown"] = normalize_markdown("\n".join(md))
-        return data
-
-    except Exception as e:
-        print(f"ERROR in market_forces_agent: {e}")
+    data = await _llm_json(MARKET_FORCES_SYSTEM, prompt, max_tokens=2800,
+                           temperature=0.4, timeout=75.0)
+    if data.get("error"):
         return {
-            "error": str(e),
-            "markdown": f"Error: {e}",
+            "error": data["error"],
             "forces": [],
             "most_determinative": None,
-            "confidence": None,
+            "memo_contribution": f"Market Forces error: {data['error']}",
+            "markdown": f"## Market Forces Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Market Forces failed: {data['error']}"],
         }
+
+    # Markdown render
+    md = []
+    arrow = {"intensifying": "↑", "weakening": "↓", "stable": "→"}
+    for f in (data.get("forces") or []):
+        name = f.get("name", "?").replace("_", " ").title()
+        md.append(
+            f"- **{name}** ({f.get('intensity', '?')}/5 "
+            f"{arrow.get(f.get('intensity_trajectory',''), '·')}) — "
+            f"{f.get('specific_evidence', '')}"
+        )
+    if data.get("most_determinative"):
+        md.append(f"\n**Most determinative:** {data['most_determinative']}")
+    if data.get("secondary_determinative"):
+        md.append(f"**Secondary:** {data['secondary_determinative']}")
+    if data.get("generic_strategy_assessment"):
+        md.append(f"\n**Generic strategy posture:** `{data['generic_strategy_assessment']}`")
+    if data.get("stuck_in_middle_risk"):
+        md.append(f"\n{data['stuck_in_middle_risk']}")
+    if data.get("temporal_dynamics"):
+        md.append(f"\n## Temporal Dynamics (18-24 mo)\n\n{data['temporal_dynamics']}")
+    if data.get("industry_profit_pool_shift"):
+        md.append(f"\n## Profit Pool Shift\n\n{data['industry_profit_pool_shift']}")
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
 
 # ------------------------------------------------------------
 # AGENT 3: FINANCIAL AGENT
 # ------------------------------------------------------------
-async def financial_agent(crux_output: str, drivers_output: str, document_context=None, user_numbers: str = ""):
-    prompt = f"""You are the Financial Agent. Quantify feasibility and impact across three scenarios.
+FINANCIAL_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Financial Agent. You translate strategy into numbers and stress-test whether the strategy can actually deliver on the goals the operator stated.
 
-Crux: {crux_output}
-Drivers: {drivers_output}
+Your core discipline: YOU DO NOT SOFTEN THE OPERATOR'S STATED GOALS. If the base case doesn't meet them, you SAY SO. Loudly.
+
+Most strategy financial work fails by:
+1. Generating scenarios that conveniently match the stated goals (fake alignment)
+2. Burying the gap between base case and stated goals in footnotes
+
+You do neither.
+</your_role>
 """
 
+
+async def financial_agent(crux_output: str, drivers_output: str, document_context=None,
+                          user_numbers: str = "", goal: str = "",
+                          success_metrics: str = "",
+                          portfolio_output: Optional[dict] = None) -> dict:
+    """v2 Financial — scenario modeling with goal_alignment enforcement.
+    Scenarios have probabilities summing to 1.0. Each stated goal gets its own
+    goal_alignment object. goal_gap_flag surfaces loudly to the Synthesizer.
+    """
+    portfolio_rec = ""
+    portfolio_thesis = ""
+    portfolio_assumptions = ""
+    if portfolio_output and isinstance(portfolio_output, dict):
+        portfolio_rec = portfolio_output.get("primary_recommendation", "")
+        for opt in (portfolio_output.get("options") or []):
+            if opt.get("name") == portfolio_rec:
+                portfolio_thesis = opt.get("core_thesis", "")
+                lbas = opt.get("load_bearing_assumptions") or []
+                portfolio_assumptions = "; ".join(
+                    f"{a.get('assumption','?')} (confidence: {a.get('confidence','?')})" for a in lbas[:5]
+                )
+                break
+
+    prompt = f"""<your_task>
+Build three scenarios: base, bull, bear. Probabilities must sum to 1.0.
+BASE: Median expectation if the recommended strategy is executed reasonably well. In turnarounds, base probability is typically 0.5-0.6, NOT 0.8.
+BULL: Upside scenario.
+BEAR: Downside scenario — must include probability of covenant breach / cash-out / down-round where applicable.
+
+UNIT ECONOMICS: Current state vs required state (what needs to be true for goals to be met). If required is implausible given current, flag.
+
+GOAL ALIGNMENT: For EACH stated goal/metric, compare base-case outcome to the goal. If gap exists, say so LOUDLY. Set goal_gap_flag True. Do not soften.
+
+SENSITIVITY: Which 2-3 variables drive outcomes most?
+CAPITAL REQUIREMENT: What capital does the strategy need? When? Source?
+FINANCING IMPLICATIONS: Valuation / runway / covenant implications.
+
+Model the RECOMMENDED strategy specifically. Not generic outcomes.
+</your_task>
+
+<input_context>
+Crux: {crux_output}
+Drivers: {drivers_output}
+Goal: {goal}
+Success Metrics: {success_metrics}
+Recommended option (Portfolio): {portfolio_rec}
+Option core thesis: {portfolio_thesis}
+Portfolio load-bearing assumptions: {portfolio_assumptions}
+</input_context>
+"""
     if user_numbers and user_numbers.strip():
         prompt += (
-            "\n**USER-PROVIDED NUMBERS (authoritative — use these, do not estimate over them):**\n"
+            "\n<user_numbers_authoritative>\n"
             f"{user_numbers.strip()}\n"
-            "When these overlap with your projections (revenue, CAC, LTV, churn, margin, customer count),"
-            " use the user's figures directly. Extrapolate only the missing pieces.\n\n"
+            "These are given. Use them directly. Extrapolate only the missing pieces.\n"
+            "</user_numbers_authoritative>\n"
         )
 
     if document_context:
-        prompt += f"\n**FINANCIAL DATA FROM DOCUMENT:**\n{document_context[:8000]}\n\nUse actual financials from this document to ground your projections.\n\n"
+        prompt += f"\n<document_context>\n{document_context[:7000]}\n</document_context>\n"
 
-    prompt += """Task: Output a JSON object with financial projections across Base, Bull, and Bear scenarios,
-plus unit economics for the business.
-
-JSON Format (all dollar values in millions unless noted):
-{{
-  "scenarios": {{
-    "base": {{
-      "initial_investment": <number>,
-      "cash_flows": [<Y1>, <Y2>, <Y3>, <Y4>, <Y5>],
-      "discount_rate": <decimal, e.g., 0.10>,
-      "revenue_y5": <number>,
-      "ebitda_y5": <number>
-    }},
-    "bull": {{ ...same shape, more optimistic... }},
-    "bear": {{ ...same shape, pessimistic... }}
-  }},
-  "unit_economics": {{
-    "cac": <customer acquisition cost, $ per customer>,
-    "ltv": <lifetime value, $ per customer>,
-    "gross_margin": <decimal, e.g., 0.70 for 70%>,
-    "churn_rate": <annual decimal, e.g., 0.08 for 8%>,
-    "arpu_monthly": <monthly ARPU in dollars, optional>
-  }},
-  "assumptions": "<1-2 sentences naming the key assumptions>",
-  "narrative": "<2-3 paragraph financial analysis in markdown>"
-}}
-
-Rules:
-- Anchor to real industry benchmarks when possible
-- Bull = upside case (faster growth, lower churn); Bear = downside (slower, higher churn)
-- Cash flows are annual NET cash flow (revenue - costs) in millions
-- Output ONLY the JSON object, no markdown code fences"""
-
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a financial analyst. Return only valid JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1800,
-                temperature=0.3
-            ),
-            timeout=45.0
-        )
-
-        content = response.choices[0].message.content
-        content = content.replace("```json", "").replace("```", "").strip()
-
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError as je:
-            print(f"JSON Parse Error in financial_agent: {je}")
-            return {
-                "error": f"JSON parse failed: {je}",
-                "markdown": normalize_markdown(content),
-                "scenarios": {},
-                "unit_economics": {},
-                "narrative": content,
-                "assumptions": "",
-            }
-
-        # Compute metrics for each scenario in Python (more reliable than LLM math)
-        scenarios_out = {}
-        for name in ("base", "bull", "bear"):
-            sc = data.get("scenarios", {}).get(name) or {}
-            metrics = calculate_financial_metrics(
-                initial_investment=sc.get("initial_investment", 0) or 0,
-                cash_flows=sc.get("cash_flows", []) or [],
-                discount_rate=sc.get("discount_rate", 0.10) or 0.10,
-            )
-            scenarios_out[name] = {**sc, "metrics": metrics}
-
-        # Derive unit-economics ratios
-        ue = dict(data.get("unit_economics") or {})
-        cac = float(ue.get("cac") or 0)
-        ltv = float(ue.get("ltv") or 0)
-        gross_margin = float(ue.get("gross_margin") or 0)
-        arpu_monthly = float(ue.get("arpu_monthly") or 0)
-        ue["ltv_cac_ratio"] = round(ltv / cac, 2) if cac > 0 else None
-        # Payback months: CAC / (monthly ARPU * gross margin). Skip if we can't compute.
-        if arpu_monthly > 0 and gross_margin > 0 and cac > 0:
-            ue["payback_months"] = round(cac / (arpu_monthly * gross_margin), 1)
-        else:
-            ue["payback_months"] = None
-
-        # Rule of 40 from base scenario: growth Y1→Y5 CAGR + EBITDA margin
-        base = scenarios_out.get("base", {})
-        cfs = base.get("cash_flows") or []
-        rev5 = float(base.get("revenue_y5") or 0)
-        ebitda5 = float(base.get("ebitda_y5") or 0)
-        cagr = None
-        if len(cfs) >= 5 and cfs[0] and cfs[0] > 0 and cfs[4] and cfs[4] > 0:
-            cagr = (cfs[4] / cfs[0]) ** (1 / 4) - 1
-        ebitda_margin = (ebitda5 / rev5) if rev5 > 0 else None
-        rule_of_40 = None
-        if cagr is not None and ebitda_margin is not None:
-            rule_of_40 = round((cagr + ebitda_margin) * 100, 1)
-        ue["cagr"] = round(cagr * 100, 1) if cagr is not None else None
-        ue["ebitda_margin"] = round(ebitda_margin * 100, 1) if ebitda_margin is not None else None
-        ue["rule_of_40"] = rule_of_40
-
-        narrative = data.get("narrative", "")
-        assumptions = data.get("assumptions", "")
-
-        # Markdown rendering — kept for downstream agents that still consume text
-        base_metrics = scenarios_out.get("base", {}).get("metrics", {})
-        markdown = f"""## 📊 Financial Analysis
-
-{narrative}
-
-**Base-case metrics:** NPV {base_metrics.get('npv_str', 'N/A')} · IRR {base_metrics.get('irr_str', 'N/A')} · Payback {base_metrics.get('payback_str', 'N/A')} · ROI {base_metrics.get('roi_str', 'N/A')}
-
-**Key assumptions:** {assumptions}
+    prompt += """
+Return JSON (values in millions unless noted):
+{
+  "scenarios": {
+    "base": {
+      "probability": 0.6,
+      "initial_investment": 0,
+      "cash_flows": [Y1, Y2, Y3, Y4, Y5],
+      "discount_rate": 0.10,
+      "revenue_y5": 0,
+      "ebitda_y5": 0,
+      "key_assumptions": ["string"],
+      "break_conditions": ["string — what would invalidate this scenario"]
+    },
+    "bull": { ... },
+    "bear": { ... }
+  },
+  "unit_economics": {
+    "cac": 0,
+    "ltv": 0,
+    "gross_margin": 0.70,
+    "churn_rate": 0.08,
+    "arpu_monthly": 0,
+    "current_state": {"metric": "value"},
+    "required_state": {"metric": "value"},
+    "gap_analysis": "string"
+  },
+  "goal_alignment": [
+    {
+      "stated_goal": "string (exact wording from user)",
+      "base_case_outcome": "string",
+      "gap_exists": true,
+      "gap_description": "string or null",
+      "what_would_close_gap": "string or null"
+    }
+  ],
+  "goal_gap_flag": true,
+  "goal_gap_explanation": "string or null",
+  "capital_requirement": "string — how much, when, for what",
+  "financing_implications": "string — covenants, valuation, runway",
+  "sensitivity_analysis": {"top_drivers": ["string"], "details": "string"},
+  "assumptions": "string — 1-2 sentences naming key assumptions",
+  "narrative": "string — 2-3 paragraphs",
+  "memo_contribution": "string — 2-3 sentences the Synthesizer will use, INCLUDING any goal gap if flagged",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
+}
 """
 
+    data = await _llm_json(FINANCIAL_SYSTEM, prompt, max_tokens=3500,
+                           temperature=0.3, timeout=90.0)
+    if data.get("error"):
         return {
-            "scenarios": scenarios_out,
-            "unit_economics": ue,
-            "narrative": narrative,
-            "assumptions": assumptions,
-            "markdown": normalize_markdown(markdown),
-        }
-
-    except Exception as e:
-        print(f"ERROR in financial_agent: {e}")
-        return {
-            "error": str(e),
-            "markdown": f"Error: {e}",
+            "error": data["error"],
             "scenarios": {},
             "unit_economics": {},
             "narrative": "",
             "assumptions": "",
+            "goal_alignment": [],
+            "goal_gap_flag": False,
+            "memo_contribution": f"Financial error: {data['error']}",
+            "markdown": f"## Financial Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Financial failed: {data['error']}"],
         }
+
+    # Compute metrics for each scenario in Python (more reliable than LLM math)
+    scenarios_out = {}
+    for name in ("base", "bull", "bear"):
+        sc = data.get("scenarios", {}).get(name) or {}
+        metrics = calculate_financial_metrics(
+            initial_investment=sc.get("initial_investment", 0) or 0,
+            cash_flows=sc.get("cash_flows", []) or [],
+            discount_rate=sc.get("discount_rate", 0.10) or 0.10,
+        )
+        scenarios_out[name] = {**sc, "metrics": metrics}
+
+    # Derive unit-economics ratios
+    ue = dict(data.get("unit_economics") or {})
+    try:
+        cac = float(ue.get("cac") or 0)
+        ltv = float(ue.get("ltv") or 0)
+        gross_margin = float(ue.get("gross_margin") or 0)
+        arpu_monthly = float(ue.get("arpu_monthly") or 0)
+    except (TypeError, ValueError):
+        cac = ltv = gross_margin = arpu_monthly = 0
+
+    ue["ltv_cac_ratio"] = round(ltv / cac, 2) if cac > 0 else None
+    if arpu_monthly > 0 and gross_margin > 0 and cac > 0:
+        ue["payback_months"] = round(cac / (arpu_monthly * gross_margin), 1)
+    else:
+        ue["payback_months"] = None
+
+    base = scenarios_out.get("base", {})
+    cfs = base.get("cash_flows") or []
+    try:
+        rev5 = float(base.get("revenue_y5") or 0)
+        ebitda5 = float(base.get("ebitda_y5") or 0)
+    except (TypeError, ValueError):
+        rev5 = ebitda5 = 0
+    cagr = None
+    if len(cfs) >= 5 and cfs[0] and cfs[0] > 0 and cfs[4] and cfs[4] > 0:
+        try:
+            cagr = (cfs[4] / cfs[0]) ** (1 / 4) - 1
+        except Exception:
+            cagr = None
+    ebitda_margin = (ebitda5 / rev5) if rev5 > 0 else None
+    rule_of_40 = None
+    if cagr is not None and ebitda_margin is not None:
+        rule_of_40 = round((cagr + ebitda_margin) * 100, 1)
+    ue["cagr"] = round(cagr * 100, 1) if cagr is not None else None
+    ue["ebitda_margin"] = round(ebitda_margin * 100, 1) if ebitda_margin is not None else None
+    ue["rule_of_40"] = rule_of_40
+
+    data["scenarios"] = scenarios_out
+    data["unit_economics"] = ue
+
+    # Markdown rendering — used by downstream agents and UI fallback
+    narrative = data.get("narrative", "")
+    assumptions = data.get("assumptions", "")
+    gga = data.get("goal_alignment") or []
+    base_metrics = scenarios_out.get("base", {}).get("metrics", {})
+
+    md = [f"## Financial Analysis\n\n{narrative}"]
+    md.append(
+        f"\n**Base-case metrics:** NPV {base_metrics.get('npv_str', 'N/A')} · "
+        f"IRR {base_metrics.get('irr_str', 'N/A')} · "
+        f"Payback {base_metrics.get('payback_str', 'N/A')} · "
+        f"ROI {base_metrics.get('roi_str', 'N/A')}"
+    )
+    if data.get("goal_gap_flag"):
+        md.append("\n### ⚠ Goal Gap Flagged")
+        md.append(data.get("goal_gap_explanation", ""))
+        for g in gga:
+            if g.get("gap_exists"):
+                md.append(
+                    f"- **{g.get('stated_goal','?')}**: {g.get('gap_description','')}  \n"
+                    f"  _To close_: {g.get('what_would_close_gap','')}"
+                )
+    if data.get("capital_requirement"):
+        md.append(f"\n**Capital requirement:** {data['capital_requirement']}")
+    if data.get("financing_implications"):
+        md.append(f"\n**Financing implications:** {data['financing_implications']}")
+    if assumptions:
+        md.append(f"\n**Key assumptions:** {assumptions}")
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
 
 
 def calculate_financial_metrics(initial_investment, cash_flows, discount_rate=0.10):
@@ -770,490 +1305,1047 @@ def calculate_financial_metrics(initial_investment, cash_flows, discount_rate=0.
 # ------------------------------------------------------------
 # AGENT 4: OPS / EXECUTION AGENT
 # ------------------------------------------------------------
-async def ops_agent(crux_output: str, financial_output: str, document_context=None, portfolio_output: str = ""):
-    prompt = f"""
-You are the Operations & Execution Agent. Design a coherent, sequenced action system.
+OPS_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Ops Agent. You own Rumelt's COHERENT ACTION layer.
 
-Crux:
-{crux_output}
+The Diagnostician named the Crux. The Portfolio Agent defined the Guiding Policy and selected an option. Your job: translate that into a sequenced plan where every action coherently supports the guiding policy.
 
-Financial Constraints:
-{financial_output}
+You enforce coherence ruthlessly. You reject actions that don't serve the guiding policy, even if they're good ideas in general.
+</your_role>
 """
-    if portfolio_output and portfolio_output.strip():
-        prompt += (
-            "\n**STRATEGIC OPTION TO EXECUTE:**\n"
-            "Below is the Strategy Portfolio. Identify the PRIMARY RECOMMENDATION and tailor your\n"
-            "entire plan to THAT specific option. Reference the option name in your pillars.\n\n"
-            f"{portfolio_output[:9000]}\n"
-        )
 
-    if document_context:
-        prompt += f"\n**ORGANIZATIONAL CONTEXT:**\n{document_context[:7000]}\n\n"
 
-    prompt += """
-Rumelt principle: actions must be **coherent** (reinforcing) — not a laundry list.
+async def ops_agent(crux_output: str, financial_output, document_context=None,
+                    portfolio_output=None, tech_output=None, human_output=None,
+                    diagnosis_output=None) -> dict:
+    """v2 Ops — Rumelt coherent action. Executes the Portfolio's chosen option.
+    Takes dict or string for upstream agent outputs for backward compat.
+    """
+    # Normalize all upstream to strings
+    def _to_text(x):
+        if x is None: return ""
+        if isinstance(x, dict): return x.get("markdown") or x.get("memo_contribution") or ""
+        return str(x)
 
-Output these sections in Markdown:
+    portfolio_text = _to_text(portfolio_output)
+    financial_text = _to_text(financial_output)
+    tech_text = _to_text(tech_output)
+    human_text = _to_text(human_output)
 
-## 1) Action Pillars (3-5, MECE)
-For each pillar:
-- Name (punchy, <8 words)
-- Why this pillar matters in one sentence
-- 2-3 concrete actions underneath
+    # Extract portfolio anchors if available as dict
+    portfolio_rec = ""
+    guiding_policy = ""
+    downstream_instruction = ""
+    kill_criteria = []
+    if isinstance(portfolio_output, dict):
+        portfolio_rec = portfolio_output.get("primary_recommendation", "")
+        downstream_instruction = portfolio_output.get("downstream_instruction", "")
+        for opt in (portfolio_output.get("options") or []):
+            if opt.get("name") == portfolio_rec:
+                guiding_policy = opt.get("guiding_policy", "")
+                kill_criteria = opt.get("kill_criteria", []) or []
+                break
 
-## 2) 30 / 60 / 90 Day Plan
-A table (Markdown) with columns: `Timeframe | Action | Owner (Role) | Success Signal`
-- 30-day actions: quick wins, team assembly, data baselines
-- 60-day actions: pilots, partnerships, capability builds
-- 90-day actions: at-scale rollouts, measurement, decision gates
+    prompt = f"""<your_task>
+The Portfolio Agent has chosen Option [{portfolio_rec or 'primary'}]. Execute ONLY that option. Do NOT include actions from non-selected options. If you disagree, write to concerns — do not silently add parallel tracks.
 
-## 3) RACI Snapshot
-For each Action Pillar, one line: `Pillar — R: <role>, A: <role>, C: <roles>, I: <roles>`
+A 30/60/90 plan is a DEPENDENCY CHAIN, not three lists by date.
 
-## 4) Dependencies & Critical Path
-List 2-3 blocking dependencies. What MUST ship first for the rest to work?
+For each action:
+- description: specific, not generic
+- timeframe: 30_day / 60_day / 90_day / later
+- prerequisite: which other action must complete first? ("independent" if none)
+- owner_role: role, not name
+- success_signal: how we know this worked
+- reversibility: reversible / costly / one_way
+- rumelt_coherence_check: ONE sentence explaining how this action supports the guiding policy
 
-## 5) Risks & Mitigations
-3 risks, each with a concrete mitigation. Focus on execution risks, not strategy risks (Red Team covers those).
+CRITICAL PATH: order actions into the dependency spine.
+ONE-WAY DOORS: identify. They should be sequenced AFTER cheap reversible experiments.
+DECISION GATES: at day 30, 60, 90 — what condition determines continue vs. pivot?
+MONDAY MORNING ACTION: the single most important thing to do THIS WEEK.
 
-## 6) Decision Gates
-For each 30/60/90 phase, one metric that triggers a pivot vs continue decision.
-"""
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the Operations & Execution Agent. Design a sequenced, coherent plan."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1600,
-                temperature=0.4
-            ),
-            timeout=45.0
-        )
-        return normalize_markdown(response.choices[0].message.content)
-    except Exception as e:
-        print(f"ERROR in ops_agent: {e}")
-        return f"Error: {str(e)}"
+Before including any action, ask: "Does this action, executed well, advance the guiding policy?" If unclear, write to concerns.
+</your_task>
 
-# ------------------------------------------------------------
-# AGENT 5: AI & TECHNOLOGY AGENT
-# ------------------------------------------------------------
-async def tech_agent(ops_output: str, document_context=None):
-    prompt = f"""
-You are the AI & Technology Agent. Your job is DOMAIN-SPECIFIC technology strategy — not generic "we should use AI."
-
-Action Plan to support:
-{ops_output}
+<input_context>
+Crux: {crux_output}
+Portfolio chosen option: {portfolio_rec}
+Portfolio guiding policy: {guiding_policy}
+Portfolio downstream instruction: {downstream_instruction}
+Portfolio kill criteria: {json.dumps(kill_criteria)[:2000]}
+Portfolio full output (reference): {portfolio_text[:5000]}
+Financial capital requirements: {financial_text[:2500]}
+Tech capability decisions: {tech_text[:2000]}
+Human role requirements: {human_text[:2000]}
+</input_context>
 """
     if document_context:
-        prompt += f"\n**TECH/R&D CONTEXT:**\n{document_context[:6000]}\n\n"
+        prompt += f"\n<document_context>\n{document_context[:4000]}\n</document_context>\n"
 
     prompt += """
-First, name the specific industry / domain this strategy operates in. Then tailor everything below to that domain.
-
-Output in Markdown:
-
-## 1) Domain Context
-One sentence naming the industry + the dominant tech stack incumbents use today.
-One sentence on what's changing (LLMs, vertical AI, automation, platform shifts, etc.).
-
-## 2) Tech Leverage Points (3-5)
-For each: `<Leverage point>: what it replaces/amplifies, and the concrete capability needed.`
-Rank by expected impact. Be specific — "churn-prediction ML scoring nightly batch" beats "use AI for retention."
-
-## 3) Build vs Buy vs Partner
-A short table with columns: `Capability | Build | Buy | Partner | Recommendation | Why`
-Cover the 3 most strategically important capabilities from section 2.
-
-## 4) Data & Systems Requirements
-What must exist for the leverage points to work? (data sources, integrations, MLOps, governance)
-
-## 5) Tech Risks Specific to This Strategy
-3 risks — focus on ones tied to THIS domain (regulatory, data scarcity, vendor lock-in, model drift, etc.). Generic risks like "AI might be wrong" are rejected.
+Return JSON:
+{
+  "chosen_option_name": "string — must match Portfolio primary_recommendation",
+  "guiding_policy_reference": "string — restate the guiding policy this plan executes",
+  "actions": [
+    {
+      "description": "string — specific",
+      "timeframe": "30_day|60_day|90_day|later",
+      "prerequisite": "string (description of prior action) or null",
+      "owner_role": "string",
+      "success_signal": "string",
+      "reversibility": "reversible|costly|one_way",
+      "rumelt_coherence_check": "string — ONE sentence"
+    }
+  ],
+  "critical_path": ["ordered action description", "..."],
+  "one_way_doors": ["action description"],
+  "decision_gates": [
+    {"day": 30, "condition": "string", "if_pass": "string", "if_fail": "string"},
+    {"day": 60, "condition": "string", "if_pass": "string", "if_fail": "string"},
+    {"day": 90, "condition": "string", "if_pass": "string", "if_fail": "string"}
+  ],
+  "pivot_path": "string — reference to backup option with trigger conditions",
+  "monday_morning_action": "string — the ONE thing to do this Monday",
+  "memo_contribution": "string — 2-3 sentences for Synthesizer's Coherent Actions section",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
+}
 """
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the AI & Technology Agent. Ground every recommendation in the specific domain."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1200,
-                temperature=0.4
-            ),
-            timeout=45.0
-        )
-        return normalize_markdown(response.choices[0].message.content)
-    except Exception as e:
-        print(f"ERROR in tech_agent: {e}")
-        return f"Error: {str(e)}"
+
+    data = await _llm_json(OPS_SYSTEM, prompt, max_tokens=3000,
+                           temperature=0.4, timeout=75.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "actions": [],
+            "memo_contribution": f"Ops error: {data['error']}",
+            "markdown": f"## Ops Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Ops failed: {data['error']}"],
+        }
+
+    md = []
+    if data.get("chosen_option_name"):
+        md.append(f"## Executing: **{data['chosen_option_name']}**")
+    if data.get("guiding_policy_reference"):
+        md.append(f"_{data['guiding_policy_reference']}_")
+    if data.get("monday_morning_action"):
+        md.append(f"\n### 🗓 Monday Morning Action\n\n{data['monday_morning_action']}")
+
+    # 30/60/90 table
+    actions = data.get("actions") or []
+    if actions:
+        md.append("\n## Action Plan")
+        md.append("\n| When | Action | Owner | Signal | Reversibility |")
+        md.append("|------|--------|-------|--------|---------------|")
+        for a in actions:
+            md.append(
+                f"| {a.get('timeframe','?')} | {a.get('description','?')} | "
+                f"{a.get('owner_role','?')} | {a.get('success_signal','?')} | "
+                f"{a.get('reversibility','?')} |"
+            )
+
+    if data.get("critical_path"):
+        md.append("\n## Critical Path")
+        for i, step in enumerate(data["critical_path"], 1):
+            md.append(f"{i}. {step}")
+    if data.get("one_way_doors"):
+        md.append("\n## ⚠ One-Way Doors")
+        for d in data["one_way_doors"]:
+            md.append(f"- {d}")
+    if data.get("decision_gates"):
+        md.append("\n## Decision Gates")
+        for g in data["decision_gates"]:
+            md.append(
+                f"- **Day {g.get('day','?')}**: {g.get('condition','?')}  \n"
+                f"  ✓ if pass: {g.get('if_pass','')}  \n"
+                f"  ✗ if fail: {g.get('if_fail','')}"
+            )
+    if data.get("pivot_path"):
+        md.append(f"\n## Pivot Path\n\n{data['pivot_path']}")
+
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
+
 
 # ------------------------------------------------------------
-# AGENT 6: HUMAN FACTORS AGENT
+# AGENT 5: AI & TECHNOLOGY AGENT (v2 — capability layer, bound to Portfolio)
 # ------------------------------------------------------------
-async def human_factors_agent(ops_output: str, document_context=None):
-    prompt = f"""
-You are the Human Factors Agent. Apply Kotter's 8-Step Change Model to THIS strategy.
+TECH_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Tech Agent. You translate the recommended strategy into required technical capabilities and name the risks of getting them wrong.
 
-Action Plan:
-{ops_output}
+You think in build/buy/partner tradeoffs, in time-to-capability, and in what the firm will regret in 18 months if it under-invests in measurement infrastructure today.
+
+You are NOT a general IT strategist. You are specifically thinking about what the CHOSEN strategic option requires, technically, to succeed.
+</your_role>
+"""
+
+
+async def tech_agent(ops_output=None, document_context=None,
+                     portfolio_output=None) -> dict:
+    """v2 Tech — bound to Portfolio's chosen option. Build/buy/partner analysis,
+    technical risk, measurement instrumentation.
+    """
+    portfolio_rec = ""
+    portfolio_thesis = ""
+    portfolio_di = ""
+    if isinstance(portfolio_output, dict):
+        portfolio_rec = portfolio_output.get("primary_recommendation", "")
+        portfolio_di = portfolio_output.get("downstream_instruction", "")
+        for opt in (portfolio_output.get("options") or []):
+            if opt.get("name") == portfolio_rec:
+                portfolio_thesis = opt.get("core_thesis", "")
+                break
+
+    prompt = f"""<your_task>
+For the recommended option, define the technical layer.
+
+1. REQUIRED CAPABILITIES — specific. "Customer-level attribution across Meta/email/wholesale" beats "better data."
+2. CAPABILITY DECISIONS — build / buy / partner / existing. Consider time-to-capability, cost, strategic importance. Foundational capabilities should be built or bought, not partnered.
+3. TECHNICAL RISKS — severity × likelihood, specific mitigations.
+4. DATA & MEASUREMENT — what MUST be instrumented to know if strategy works. "Install attribution in month 1, before spending reallocation, or make decisions on corrupted signal for 6+ months."
+5. TECHNICAL DEBT IMPLICATIONS — will this strategy create debt? When does it come due?
+6. PLATFORM DEPENDENCIES — third-party dependencies this strategy introduces or deepens.
+</your_task>
+
+<input_context>
+Recommended option: {portfolio_rec}
+Option thesis: {portfolio_thesis}
+Portfolio downstream instruction: {portfolio_di}
+</input_context>
 """
     if document_context:
-        prompt += f"\n**ORGANIZATIONAL/CULTURAL CONTEXT:**\n{document_context[:6000]}\n\n"
+        prompt += f"\n<document_context>\n{document_context[:5000]}\n</document_context>\n"
 
     prompt += """
-Walk the 8 steps in order. For each step, give 2-3 specific actions tied to THIS strategy. Generic advice is rejected.
-
-Output in Markdown:
-
-## Kotter's 8-Step Change Plan
-
-### 1. Create Urgency
-Why acting now is non-negotiable — specific to this strategy (competitive window, financial clock, regulatory moment).
-
-### 2. Form a Powerful Coalition
-Name the roles (not individuals) that MUST be in the coalition. Why each.
-
-### 3. Create a Vision for Change
-One sentence capturing the change in plain language a frontline employee can repeat.
-
-### 4. Communicate the Vision
-3 channels + 3 key moments where the vision gets reinforced.
-
-### 5. Remove Obstacles
-Name 2-3 structural obstacles (incentives, reporting lines, metrics, tooling). Propose the removal mechanism.
-
-### 6. Create Short-Term Wins
-Name 2-3 wins visible within the first 60-90 days that build momentum.
-
-### 7. Build on the Change
-How does success in the first wave compound? What gets un-blocked?
-
-### 8. Anchor in Culture
-Which rituals, metrics, or recognition practices make this permanent?
-
-## Adoption Blockers (Top 3)
-For each: `Blocker → Evidence it's real → Counter-measure`
-
-## Stakeholder Map
-Brief list: who wins, who loses, who decides, who executes. Flag the stakeholders whose opposition is most dangerous.
+Return JSON:
+{
+  "chosen_option_name": "string",
+  "required_capabilities": ["string — specific"],
+  "capability_decisions": [
+    {
+      "capability": "string",
+      "recommendation": "build|buy|partner|existing",
+      "rationale": "string",
+      "time_to_capability": "string",
+      "cost_magnitude": "low|medium|high|very_high",
+      "strategic_importance": "foundational|supporting|peripheral"
+    }
+  ],
+  "technical_risks": [
+    {"risk": "string", "severity": 4, "likelihood": 3, "mitigation": "string"}
+  ],
+  "data_and_measurement": ["string — specific signals to instrument"],
+  "technical_debt_implications": "string",
+  "platform_dependencies": ["string"],
+  "memo_contribution": "string — 2-3 sentences for Synthesizer",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
+}
 """
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the Human Factors Agent. Apply Kotter's 8 Steps with domain specificity."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1400,
-                temperature=0.4
-            ),
-            timeout=45.0
-        )
-        return normalize_markdown(response.choices[0].message.content)
-    except Exception as e:
-        print(f"ERROR in human_factors_agent: {e}")
-        return f"Error: {str(e)}"
+
+    data = await _llm_json(TECH_SYSTEM, prompt, max_tokens=2500,
+                           temperature=0.4, timeout=60.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "capability_decisions": [],
+            "technical_risks": [],
+            "memo_contribution": f"Tech error: {data['error']}",
+            "markdown": f"## Tech Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Tech failed: {data['error']}"],
+        }
+
+    md = []
+    if data.get("required_capabilities"):
+        md.append("## Required Capabilities")
+        for c in data["required_capabilities"]:
+            md.append(f"- {c}")
+    if data.get("capability_decisions"):
+        md.append("\n## Build / Buy / Partner")
+        md.append("\n| Capability | Decision | Time | Cost | Importance |")
+        md.append("|------------|----------|------|------|------------|")
+        for cd in data["capability_decisions"]:
+            md.append(
+                f"| {cd.get('capability','?')} | **{cd.get('recommendation','?')}** | "
+                f"{cd.get('time_to_capability','?')} | {cd.get('cost_magnitude','?')} | "
+                f"{cd.get('strategic_importance','?')} |"
+            )
+    if data.get("data_and_measurement"):
+        md.append("\n## Data & Measurement")
+        for m in data["data_and_measurement"]:
+            md.append(f"- {m}")
+    if data.get("technical_risks"):
+        md.append("\n## Technical Risks")
+        for r in data["technical_risks"]:
+            md.append(
+                f"- **{r.get('risk','?')}** (sev {r.get('severity','?')}/5, lik {r.get('likelihood','?')}/5) — "
+                f"{r.get('mitigation','')}"
+            )
+    if data.get("platform_dependencies"):
+        md.append("\n## Platform Dependencies")
+        for p in data["platform_dependencies"]:
+            md.append(f"- {p}")
+    if data.get("technical_debt_implications"):
+        md.append(f"\n## Technical Debt\n\n{data['technical_debt_implications']}")
+
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
+
+
+# ------------------------------------------------------------
+# AGENT 6: HUMAN AGENT (v2 — people layer)
+# ------------------------------------------------------------
+HUMAN_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Human Agent. You assess the PEOPLE layer of strategy execution — the thing that breaks more strategies than any technical or financial factor.
+
+You know that most strategic failure is not analytical failure. It's the firm's inability to execute because the people can't, won't, or don't have the bandwidth to.
+
+Be kind but direct. "Change management considerations" is softening. Name things.
+</your_role>
+"""
+
+
+async def human_factors_agent(ops_output=None, document_context=None,
+                              portfolio_output=None) -> dict:
+    """v2 Human — bound to Portfolio's chosen option. Talent, culture,
+    change management, leadership bandwidth, stakeholder map.
+    """
+    portfolio_rec = ""
+    portfolio_thesis = ""
+    if isinstance(portfolio_output, dict):
+        portfolio_rec = portfolio_output.get("primary_recommendation", "")
+        for opt in (portfolio_output.get("options") or []):
+            if opt.get("name") == portfolio_rec:
+                portfolio_thesis = opt.get("core_thesis", "")
+                break
+
+    prompt = f"""<your_task>
+For the recommended option:
+1. REQUIRED ROLES — does the firm have them? Senior hires take 4-6 months minimum and often fail.
+2. CULTURAL FIT — not stated values, the ACTUAL culture as revealed by how the firm operates.
+3. CULTURAL FRICTION POINTS — where will strategy grate against the firm's natural behavior?
+4. CHANGE MANAGEMENT DIFFICULTY — low/medium/high/severe. 10% behavior change = easy. Redefining what firm does = severe.
+5. INTERNAL RESISTANCE MAP — who resists, with how much influence? Map real power, not titles.
+6. LEADERSHIP BANDWIDTH — executive cycles are the scarcest resource. If strategy needs CEO driving 3 initiatives, it fails.
+7. LEADERSHIP CAPABILITY GAPS — what don't senior leaders know how to do that this requires?
+</your_task>
+
+<input_context>
+Recommended option: {portfolio_rec}
+Option thesis: {portfolio_thesis}
+</input_context>
+"""
+    if document_context:
+        prompt += f"\n<document_context>\n{document_context[:5000]}\n</document_context>\n"
+
+    prompt += """
+Return JSON:
+{
+  "chosen_option_name": "string",
+  "required_roles": [
+    {
+      "role": "string",
+      "level": "executive|senior|mid|junior",
+      "existing_or_hire": "existing_fits|existing_needs_development|hire_required|contractor_sufficient",
+      "timeline": "string",
+      "cost_magnitude": "low|medium|high"
+    }
+  ],
+  "cultural_fit_assessment": "string — does this strategy fit the firm's ACTUAL culture?",
+  "cultural_friction_points": ["string"],
+  "change_management_difficulty": "low|medium|high|severe",
+  "change_management_risks": ["string"],
+  "internal_resistance_map": [
+    {
+      "stakeholder": "string (role)",
+      "likely_position": "champion|supportive|neutral|skeptical|opposed",
+      "influence_level": "high|medium|low",
+      "mitigation_or_enrollment": "string"
+    }
+  ],
+  "leadership_bandwidth_assessment": "string — does leadership have cycles?",
+  "leadership_capability_gaps": ["string"],
+  "memo_contribution": "string — 2-3 sentences for Synthesizer",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
+}
+"""
+
+    data = await _llm_json(HUMAN_SYSTEM, prompt, max_tokens=2500,
+                           temperature=0.4, timeout=60.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "required_roles": [],
+            "internal_resistance_map": [],
+            "memo_contribution": f"Human error: {data['error']}",
+            "markdown": f"## Human Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Human failed: {data['error']}"],
+        }
+
+    md = []
+    if data.get("change_management_difficulty"):
+        md.append(f"**Change management difficulty:** `{data['change_management_difficulty']}`")
+    if data.get("cultural_fit_assessment"):
+        md.append(f"\n## Cultural Fit\n\n{data['cultural_fit_assessment']}")
+    if data.get("cultural_friction_points"):
+        md.append("\n## Friction Points")
+        for f in data["cultural_friction_points"]:
+            md.append(f"- {f}")
+    if data.get("required_roles"):
+        md.append("\n## Required Roles")
+        md.append("\n| Role | Level | Status | Timeline | Cost |")
+        md.append("|------|-------|--------|----------|------|")
+        for r in data["required_roles"]:
+            md.append(
+                f"| {r.get('role','?')} | {r.get('level','?')} | {r.get('existing_or_hire','?')} | "
+                f"{r.get('timeline','?')} | {r.get('cost_magnitude','?')} |"
+            )
+    if data.get("internal_resistance_map"):
+        md.append("\n## Internal Resistance Map")
+        for s in data["internal_resistance_map"]:
+            md.append(
+                f"- **{s.get('stakeholder','?')}** ({s.get('likely_position','?')}, "
+                f"influence: {s.get('influence_level','?')}) — {s.get('mitigation_or_enrollment','')}"
+            )
+    if data.get("leadership_bandwidth_assessment"):
+        md.append(f"\n## Leadership Bandwidth\n\n{data['leadership_bandwidth_assessment']}")
+    if data.get("leadership_capability_gaps"):
+        md.append("\n## Leadership Gaps")
+        for g in data["leadership_capability_gaps"]:
+            md.append(f"- {g}")
+
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
 
 # ------------------------------------------------------------
 # AGENT 6.5: STRATEGY PORTFOLIO AGENT
 # ------------------------------------------------------------
-async def strategy_portfolio_agent(situation: str, goal: str, constraints: str, crux: str, document_context=None):
-    print(f"DEBUG: Starting Portfolio Agent. Situation len: {len(situation)}, Crux len: {len(crux)}")
-    prompt = f"""
-SYSTEM PROMPT — STRATEGY PORTFOLIO AGENT
+PORTFOLIO_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Portfolio Agent. You generate genuinely distinct strategic options, score them honestly, and make a call.
 
-You are the Strategy Portfolio Agent inside Vanguard OS, an advanced multi-agent strategic intelligence system.
-Your mission is to take a structured strategic situation (S–G–C: Situation, Goals, Constraints), and generate, analyze, stress-test, score, and compare multiple distinct strategic options—not just one.
+Your role in the Rumelt architecture: you own the GUIDING POLICY. The Diagnostician named the Crux; you define the approach that addresses it. The Ops agent will execute what you decide.
 
-You must think like:
-- a McKinsey senior partner,
-- a BCG portfolio strategist,
-- a Bain transformation architect,
-- and a Rumelt-style crux practitioner.
+Your voice is a senior McKinsey partner presenting to a CEO and board. You are not hedging. You have a view.
 
-Your output must be sharp, analytical, explicit, and structured.
+Three common failures to avoid:
+1. "Three flavors of the same strategy" — if all options bet on the same theory, you have one option with variants.
+2. "Score everything evenly" — if your recommendation only wins by 0.3 on a 10-point scale, you averaged instead of choosing.
+3. "Recommend without tradeoff" — every real strategy gives something up. Name what.
+</your_role>
+"""
 
-🔷 PROCESS OVERVIEW (Follow EXACTLY in this order)
 
-1. CRUX RECAP (Short + Surgical)
-Restate:
-- The situation
-- The crux (the real bottleneck / center of gravity)
-- The non-negotiable constraints
-- Any strategic goals or KPIs
-Keep this to 3–5 sentences maximum.
+async def strategy_portfolio_agent(situation: str, goal: str, constraints: str,
+                                    crux: str, document_context=None,
+                                    diagnosis_output: Optional[dict] = None,
+                                    enright_output: Optional[dict] = None,
+                                    market_forces_output: Optional[dict] = None,
+                                    key_numbers: str = "") -> dict:
+    """v2 Portfolio — binding downstream_instruction + kill criteria + load-bearing assumptions."""
+    # Extract key anchors from upstream
+    diag_crux = ""
+    diag_threat = ""
+    if diagnosis_output and isinstance(diagnosis_output, dict):
+        diag_crux = diagnosis_output.get("crux_sentence", "")
+        diag_threat = diagnosis_output.get("primary_external_threat", "")
 
-2. GENERATE 3–4 DISTINCT STRATEGY OPTIONS
-Each option MUST represent meaningfully different strategic logic—not variations of the same theme.
-For each option, provide:
-A. Strategy Option Name (Short, punchy label)
-B. Core Strategic Idea (2–3 sentences)
-C. Guiding Policy (How will this option win?)
-D. Coherent Actions (3–7 bullets)
-E. Primary Leverage Point (Where the power comes from)
+    dominant_level = "industry"
+    altitude_insight = ""
+    if enright_output and isinstance(enright_output, dict):
+        dominant_level = enright_output.get("dominant_level", "industry")
+        altitude_insight = enright_output.get("altitude_insight", "")
 
-Ensure diversity across options:
-- One focused wedge play
-- One broad transformation play
-- One defensive risk-limiting play
-- Optional: one bold upside / moonshot play
+    mf_summary = ""
+    if market_forces_output and isinstance(market_forces_output, dict):
+        mf_summary = f"Most determinative force: {market_forces_output.get('most_determinative', '?')}"
 
-3. SCORE EACH OPTION — STRATEGY SCORECARD
-For each option, assign scores from 1–10 for:
-- Strategic Fit with Diagnosis & Crux
-- Impact Potential on Goals
-- Feasibility / Execution Difficulty (higher = more feasible)
-- Time to Impact (higher = faster)
-- Risk Exposure (higher = more risk)
-- Differentiation vs Competitors
-- Alignment with Constraints
-Then provide a 1–2 sentence interpretation of the scores.
+    prompt = f"""<your_task>
+Generate 3-4 genuinely DISTINCT strategic options. Each option should bet on a different theory of the business.
 
-4. MINI WAR-GAME / FAILURE STRESS TEST FOR EACH OPTION
-For every option, simulate:
-A. Key Failure Mode
-B. Competitor Response
-C. Internal Resistance
-D. Mitigation / Countermeasures
+Test for distinctness: if I asked "what does each option believe about where the real value is?" — do I get different answers? If not, collapse them.
 
-5. PORTFOLIO COMPARISON & RECOMMENDATION
-Compare all options side-by-side with an EXPLICIT TRADEOFF MATRIX:
-For each pair of options (A vs B, A vs C, B vs C), give one sentence:
-"Option X beats Y on <dimension>, but loses on <other dimension>."
+For each option:
+- one_liner: under 15 words. The whole bet in a sentence.
+- core_thesis: falsifiable. "What would make this option wrong?"
+- enright_level_addressed: locate the option at the right altitude (must be the right one, often NOT firm level)
+- guiding_policy: Rumelt's term — the overall approach, not a laundry list
+- coherent_actions: 3-5 specific actions, not generic
+- threat_response: MANDATORY — how does this option address the primary_external_threat?
+- kill_criteria: NUMERIC and TIME-BOUND
+- load_bearing_assumptions: what MUST be true for the option to work
 
-Then provide:
-- Primary Recommendation (Option X) with rationale.
-- Secondary / Backup Option (Option Y) with pivot triggers.
+Consider generating a MOONSHOT option — a genuinely ambitious fourth option.
 
-6. KILL CRITERIA (per option — this is mandatory)
-For EACH option, name 1-2 observable signals that mean "abandon this option within 90 days."
-Format: `If <measurable condition>, kill this option.`
-Kill criteria must be falsifiable. Vague ones like "if market changes" are rejected.
+Then RECOMMEND. recommendation_rationale is not "it scored highest." It's a head-to-head argument. What does the operator GIVE UP by choosing primary? Name it in what_we_are_giving_up.
 
-🔷 INPUT DATA
+downstream_instruction is a CONTRACT. Ops/Financial/Tech/Human will read this and execute. Write it clearly.
+</your_task>
+
+<input_context>
 Situation: {situation}
 Goal: {goal}
+Key Numbers: {key_numbers}
 Constraints: {constraints}
-Crux Diagnosis: {crux}
-
-🔷 OUTPUT FORMAT (REQUIRED)
-Return your output using the following structure exactly:
-
-1. Crux Recap
-(4–6 sentences)
-
-2. Strategy Options
-Option A — [Name]
-...
-Option B — [Name]
-...
-Option C — [Name]
-...
-
-3. Strategy Scorecards
-Option A
-...
-Option B
-...
-
-4. Mini War-Games by Option
-Option A
-...
-Option B
-...
-
-5. Portfolio Comparison & Final Recommendation
-Tradeoff Matrix (A vs B, A vs C, B vs C):
-Primary Recommendation:
-Backup Option:
-
-6. Kill Criteria
-Option A: If <condition>, kill within 90 days.
-Option B: ...
-Option C: ...
-
-No fluff. No generic corporate filler. Explicit trade-offs.
+Crux (Diagnostician): {diag_crux or crux}
+Primary external threat: {diag_threat}
+Enright dominant level: {dominant_level}
+Enright altitude insight: {altitude_insight}
+{mf_summary}
+</input_context>
 """
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the Strategy Portfolio Agent. Generate distinct strategic options and scorecards."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=3000,
-                temperature=0.6
-            ),
-            timeout=120.0 # Increased timeout for complex portfolio generation
-        )
-        content = response.choices[0].message.content
-        if not content:
-            return "## Strategy Portfolio Generation Failed\n\nThe agent returned no content. Please try refining the prompt."
-        
-        return normalize_markdown(content)
-    except Exception as e:
-        print(f"ERROR in strategy_portfolio_agent: {e}")
-        return f"## Strategy Portfolio Error\n\nSystem encountered an error: {str(e)}"
+    if document_context:
+        prompt += f"\n<document_context>\n{document_context[:5000]}\n</document_context>\n"
+
+    prompt += """
+Return JSON matching this schema:
+{
+  "options": [
+    {
+      "name": "string, <= 4 words",
+      "one_liner": "string <= 100 chars, 15 words max",
+      "core_thesis": "string — what theory of the business this option bets on",
+      "enright_level_addressed": "supranational|national|cluster|industry|firm",
+      "guiding_policy": "string — Rumelt's guiding policy for this option",
+      "coherent_actions": ["string", "string", "string"],
+      "primary_leverage_point": "string",
+      "threat_response": "string — how this option handles primary_external_threat",
+      "load_bearing_assumptions": [
+        {"assumption": "string", "confidence": "high|medium|low", "if_wrong": "string", "how_to_test": "string"}
+      ],
+      "kill_criteria": [
+        {"metric": "string", "threshold": "string (numeric)", "timeframe": "string (time-bound)"}
+      ],
+      "failure_modes": [
+        {"mode": "string", "probability": "high|medium|low", "mitigation": "string"}
+      ],
+      "scores": {
+        "strategic_fit": 7,
+        "impact": 8,
+        "feasibility": 6,
+        "time_to_impact": 5,
+        "risk_exposure": 4,
+        "differentiation": 9,
+        "constraint_alignment": 7
+      }
+    }
+    // 3-4 options
+  ],
+  "moonshot": null,
+  "primary_recommendation": "string — name of chosen option (must match one of options[].name)",
+  "recommendation_rationale": "string — head-to-head argument: why primary beats second-place specifically",
+  "what_we_are_giving_up": "string — what the operator trades away by choosing primary",
+  "backup_recommendation": "string — name of backup option",
+  "pivot_triggers": [
+    {"signal": "string", "timeframe": "string", "action": "string"}
+  ],
+  "tradeoff_matrix": "string — A vs B, B vs C honest comparison (multi-line markdown)",
+  "downstream_instruction": "string — CONTRACT for Ops/Financial/Tech/Human. 'Execute X. Reference Y only via pivot triggers.'",
+  "memo_contribution": "string — 3-4 sentences for Synthesizer's Guiding Policy section",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}],
+  "concerns": ["string"]
+}
+"""
+
+    data = await _llm_json(PORTFOLIO_SYSTEM, prompt, max_tokens=4000,
+                           temperature=0.6, timeout=120.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "options": [],
+            "primary_recommendation": None,
+            "downstream_instruction": "",
+            "memo_contribution": f"Portfolio error: {data['error']}",
+            "markdown": f"## Portfolio Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Portfolio failed: {data['error']}"],
+        }
+
+    # Markdown render for pane display + downstream consumption
+    md = []
+    if data.get("primary_recommendation"):
+        md.append(f"## Primary Recommendation: **{data['primary_recommendation']}**")
+    if data.get("recommendation_rationale"):
+        md.append(data["recommendation_rationale"])
+    if data.get("what_we_are_giving_up"):
+        md.append(f"\n### What we're giving up\n\n{data['what_we_are_giving_up']}")
+    if data.get("backup_recommendation"):
+        md.append(f"\n**Backup:** {data['backup_recommendation']}")
+    pivots = data.get("pivot_triggers") or []
+    if pivots:
+        md.append("\n### Pivot triggers")
+        for p in pivots:
+            md.append(f"- **{p.get('signal', '?')}** ({p.get('timeframe', '?')}) → {p.get('action', '')}")
+    md.append("\n## Options")
+    for i, opt in enumerate(data.get("options") or [], 1):
+        md.append(f"\n### Option {i}: {opt.get('name', '?')}")
+        if opt.get("one_liner"):
+            md.append(f"_{opt['one_liner']}_")
+        if opt.get("core_thesis"):
+            md.append(f"\n**Core thesis:** {opt['core_thesis']}")
+        if opt.get("enright_level_addressed"):
+            md.append(f"**Operating level:** `{opt['enright_level_addressed']}`")
+        if opt.get("guiding_policy"):
+            md.append(f"**Guiding policy:** {opt['guiding_policy']}")
+        if opt.get("threat_response"):
+            md.append(f"**Threat response:** {opt['threat_response']}")
+        if opt.get("coherent_actions"):
+            md.append("**Actions:**")
+            for a in opt["coherent_actions"]:
+                md.append(f"- {a}")
+        kc = opt.get("kill_criteria") or []
+        if kc:
+            md.append("**Kill criteria:**")
+            for k in kc:
+                md.append(f"- If **{k.get('metric','?')}** {k.get('threshold','?')} within {k.get('timeframe','?')} → kill")
+    if data.get("tradeoff_matrix"):
+        md.append(f"\n## Tradeoff Matrix\n\n{data['tradeoff_matrix']}")
+    if data.get("downstream_instruction"):
+        md.append(f"\n---\n\n> **Downstream instruction:** {data['downstream_instruction']}")
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
 
 # ------------------------------------------------------------
 # AGENT 7: RED TEAM AGENT (V2)
 # ------------------------------------------------------------
-async def red_team_agent_v2(crux: str, drivers: str, financial: str, ops: str, tech: str, human: str, document_context=None, portfolio: str = ""):
-    prompt = f"""
-You are the Red Team Agent.
+RED_TEAM_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Red Team. You are NOT the system's critic — you are a steelman for the opposing view.
 
-Strategy Components:
-[CRUX]: {crux}
-[DRIVERS]: {drivers}
-[FINANCIAL]: {financial}
-[OPS]: {ops}
-[TECH]: {tech}
-[HUMAN]: {human}
+YOUR PERSONA: a skeptical investment committee member. 40+ strategy presentations. Has watched every turnaround plan fail in every possible way. Intellectually honest — you WANT the firm to succeed, but you've seen too many confident plans collapse. You target the Portfolio Agent's load_bearing_assumptions directly.
+
+Your output serves TWO purposes:
+1. Surface the 3 most dangerous attacks with specific leading indicators
+2. STEELMAN the opposing view — what would a smart skeptic recommend INSTEAD?
+</your_role>
 """
-    if portfolio and portfolio.strip():
-        # Critical addition: red team must attack the SPECIFIC recommended option.
-        prompt += (
-            "\n[STRATEGY PORTFOLIO — contains the distinct options and the PRIMARY RECOMMENDATION]:\n"
-            f"{portfolio[:8000]}\n\n"
-            "When you critique, name the specific recommended option and attack its logic.\n"
-            "Abstract critiques of ops or tech alone are rejected — tie each objection back to the option's strategic bet.\n"
-        )
 
+
+async def red_team_agent_v2(crux, drivers, financial, ops, tech, human,
+                             document_context=None, portfolio=None) -> dict:
+    """v2 Red Team — persona-driven, EXACTLY 3 attacks + steelman + revision_required flag."""
+    def _to_text(x):
+        if x is None: return ""
+        if isinstance(x, dict): return x.get("markdown") or x.get("memo_contribution") or ""
+        return str(x)
+
+    crux_s = _to_text(crux) if not isinstance(crux, str) else crux
+    drivers_s = _to_text(drivers) if not isinstance(drivers, str) else drivers
+    financial_s = _to_text(financial) if not isinstance(financial, str) else financial
+    ops_s = _to_text(ops) if not isinstance(ops, str) else ops
+    tech_s = _to_text(tech) if not isinstance(tech, str) else tech
+    human_s = _to_text(human) if not isinstance(human, str) else human
+    portfolio_s = _to_text(portfolio) if not isinstance(portfolio, str) else portfolio
+
+    portfolio_rec = ""
+    load_bearing = []
+    if isinstance(portfolio, dict):
+        portfolio_rec = portfolio.get("primary_recommendation", "")
+        for opt in (portfolio.get("options") or []):
+            if opt.get("name") == portfolio_rec:
+                load_bearing = opt.get("load_bearing_assumptions", []) or []
+                break
+
+    prompt = f"""<your_task>
+Identify EXACTLY 3 attacks. Not more. Forcing the discipline of naming the most dangerous three.
+
+For each attack:
+- attack_vector: what specifically kills the strategy?
+- severity 1-5, likelihood 1-5
+- target_assumption: WHICH load-bearing assumption does this kill?
+- leading_indicator: how would we know this is materializing by month 2-3?
+- rebuttal_difficulty: easy (manageable) / hard (expensive to rebut) / fatal (no recovery)
+- recommended_counter (optional)
+
+STRONGEST ATTACK: if one attack could alone kill the strategy, which is it?
+STRATEGY SURVIVES: can the strategy survive its strongest attack with reasonable mitigation?
+STEELMAN: what would a smart skeptic recommend INSTEAD?
+- State the alternative clearly
+- Strongest argument for it
+- If primary still wins on reflection, explain why. If steelman actually wins, say so and set revision_required = True.
+</your_task>
+
+<input_context>
+Primary recommendation: {portfolio_rec}
+Load-bearing assumptions: {json.dumps(load_bearing)[:2500]}
+[CRUX]: {crux_s[:1500]}
+[DRIVERS]: {drivers_s[:1500]}
+[FINANCIAL]: {financial_s[:2500]}
+[OPS]: {ops_s[:2500]}
+[TECH]: {tech_s[:1500]}
+[HUMAN]: {human_s[:1500]}
+[PORTFOLIO]: {portfolio_s[:4000]}
+</input_context>
+"""
     if document_context:
-        prompt += f"\n**COMPANY CONTEXT:**\n{document_context[:6000]}\n\nUse this to make your challenges more specific and grounded.\n\n"
+        prompt += f"\n<document_context>\n{document_context[:4000]}\n</document_context>\n"
 
-    prompt += """Challenge the strategy from 3 perspectives: **CFO**, **COO**, **CTO**.
-
-For each perspective, produce ONE sharp objection (not three) plus a severity score and a steelmanned counter.
-**Reference the primary recommended option by name** — your objection should be specific to THAT option,
-not a generic critique of the strategy family.
-
-**{Persona}** — Severity: {HIGH | MEDIUM | LOW}
-- **Objection:** one sentence attacking the recommended option specifically.
-- **Why it matters:** one sentence on the concrete harm if this option proceeds unchanged.
-- **Steelman counter:** one sentence on the strongest rebuttal or mitigation — don't just critique, propose.
-
-Then end with:
-
-## Top Fix
-The single most important change the team should make to the recommended option based on the critiques above. One sentence.
-
-Rules:
-- Keep it tight. No listicles of 5 objections. Severity-gated: only name issues that rise above LOW.
-- If no objection rises to MEDIUM for a persona, say "No substantive objection" for that persona.
-- No generic criticism ("This is risky") — must be specific to the recommended option.
+    prompt += """
+Return JSON:
+{
+  "persona": "Skeptical Investment Committee",
+  "attacks": [
+    {
+      "attack_vector": "string",
+      "severity": 5,
+      "likelihood": 3,
+      "target_assumption": "string — which load-bearing assumption this kills",
+      "leading_indicator": "string — how we'd see it materializing early",
+      "rebuttal_difficulty": "easy|hard|fatal",
+      "recommended_counter": "string or null"
+    }
+    // EXACTLY 3
+  ],
+  "strongest_attack": "string — which attack's attack_vector is the killer",
+  "strategy_survives": true,
+  "revision_required": false,
+  "suggested_revision": "string or null",
+  "steelman": {
+    "alternative_recommendation": "string — what a smart skeptic would recommend instead",
+    "strongest_argument": "string — the sharpest version of that case",
+    "why_primary_still_wins": "string or null — if primary still wins on reflection"
+  },
+  "memo_contribution": "string — 2-3 sentences for Synthesizer's Key Risks section, ending with the top fix",
+  "considerations": [{"consideration": "string", "why_it_matters": "string", "what_would_resolve_it": "string or null"}]
+}
 """
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the Red Team Agent. One sharp objection per persona. Steelman, don't just critique."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=900,
-                temperature=0.7
-            ),
-            timeout=45.0
+
+    data = await _llm_json(RED_TEAM_SYSTEM, prompt, max_tokens=2500,
+                           temperature=0.65, timeout=75.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "attacks": [],
+            "strategy_survives": True,
+            "revision_required": False,
+            "memo_contribution": f"Red Team error: {data['error']}",
+            "markdown": f"## Red Team Error\n\n{data['error']}",
+            "considerations": [],
+            "concerns": [f"Red Team failed: {data['error']}"],
+        }
+
+    md = []
+    attacks = data.get("attacks") or []
+    for i, a in enumerate(attacks, 1):
+        md.append(f"## Attack {i}: {a.get('attack_vector','?')}")
+        md.append(
+            f"**Severity** {a.get('severity','?')}/5 · "
+            f"**Likelihood** {a.get('likelihood','?')}/5 · "
+            f"**Rebuttal** `{a.get('rebuttal_difficulty','?')}`"
         )
-        return normalize_markdown(response.choices[0].message.content)
-    except Exception as e:
-        print(f"ERROR in red_team_agent_v2: {e}")
-        return f"Error: {str(e)}"
+        if a.get("target_assumption"):
+            md.append(f"\n_Kills assumption:_ {a['target_assumption']}")
+        if a.get("leading_indicator"):
+            md.append(f"\n_Leading indicator:_ {a['leading_indicator']}")
+        if a.get("recommended_counter"):
+            md.append(f"\n_Counter:_ {a['recommended_counter']}")
+        md.append("")
+    if data.get("strongest_attack"):
+        md.append(f"## 💀 Strongest Attack\n\n{data['strongest_attack']}")
+    if data.get("revision_required"):
+        md.append(f"\n### ⚠ Revision Required\n\n{data.get('suggested_revision','')}")
+    st = data.get("steelman") or {}
+    if st.get("alternative_recommendation"):
+        md.append("\n## Steelman — What a Smart Skeptic Would Do Instead")
+        md.append(f"\n**Alternative:** {st['alternative_recommendation']}")
+        if st.get("strongest_argument"):
+            md.append(f"\n**Strongest argument:** {st['strongest_argument']}")
+        if st.get("why_primary_still_wins"):
+            md.append(f"\n**Why primary still wins:** {st['why_primary_still_wins']}")
+
+    data["markdown"] = normalize_markdown("\n".join(md))
+    return data
 
 # ------------------------------------------------------------
 # AGENT 8: SYNTHESIZER AGENT
 # ------------------------------------------------------------
-SYNTHESIZER_SYSTEM = "You are the Synthesizer Agent. Create a McKinsey-level strategy page."
+SYNTHESIZER_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Synthesizer. You do NOT re-analyze. You ASSEMBLE.
+
+Upstream agents have produced pre-computed memo_contribution strings. Your job is compression, stitching, and voice. If you find yourself generating new analytical claims, you are doing it wrong — every claim must trace to an upstream agent.
+
+The only original content you produce is:
+1. The Bet (synthesized from Portfolio's core_thesis, load_bearing_assumptions, and kill_criteria)
+2. Transitional connective tissue between sections
+3. Quality gate flags
+4. Operator considerations (curated from upstream considerations fields)
+
+Your voice is a senior McKinsey partner writing the cover memo to a board deck. The memo should feel like it was written by one mind, not assembled by a committee.
+</your_role>
+
+<the_bet_specification>
+STRUCTURE (required):
+"We bet that [CONTRARIAN CLAIM about the world or the firm]. If we are wrong about [SPECIFIC ASSUMPTION], the strategy fails because [SPECIFIC CONSEQUENCE]. We will know within [SPECIFIC TIMEFRAME] by watching [SPECIFIC METRIC]."
+
+Three requirements:
+1. CONTRARIAN: A Bet everyone would agree with is a platitude, not a bet.
+2. FALSIFIABLE: You must be able to imagine being wrong.
+3. TIME-BOUND WITH SIGNAL: Extract timeframe and signal from Portfolio.kill_criteria.
+
+If Portfolio's core_thesis isn't contrarian enough, write to flags_for_operator: "The recommended strategy lacks a contrarian thesis — this may be a defensive play disguised as offense." Do not manufacture a fake bet.
+</the_bet_specification>
+
+<what_we_are_not_doing_specification>
+BAD (restated constraint): "Not expanding to Amazon because of brand positioning."
+GOOD (strategic non-choice): "Not investing in defending the hero SKU at the product-quality axis. We believe that axis commoditizes within 12 months regardless of our investment, and the firm's value should migrate to ritual and community before the category collapses."
+
+The good version makes a CALL the operator could defend or dispute. The bad version is "we can't."
+
+Require at least 3 strategic non-choices. If you can't produce them from upstream outputs, write to flags_for_operator: "The strategy lacks strong non-choices — options may not be as distinct as Portfolio claimed."
+</what_we_are_not_doing_specification>
+
+<quality_gates>
+1. MONDAY MORNING TEST: If operator reads only The Bet + first sentence of Executive Summary, can they act? If no, revise opening until yes.
+2. MATH CONSISTENCY: Use exact numbers from Financial.memo_contribution. If goal_gap_flag is True, acknowledge it.
+3. BET FALSIFIABILITY: The Bet has explicit contrarian claim, consequence, timeframe, and signal.
+4. RED TEAM SURVIVAL: If revision_required is True, flag this at the TOP of flags_for_operator. Do not bury it.
+
+For any gate that fails, set the boolean False and write the issue to flags_for_operator.
+</quality_gates>
+
+<forbidden_phrases>
+Ban from the final memo:
+- "It may be worth considering..."
+- "A variety of factors..."
+- "Leverage synergies"
+- "Optimize operational efficiencies"
+- "In today's competitive landscape..."
+- "Going forward"
+- Any sentence that could appear in a generic consulting deck
+</forbidden_phrases>
+"""
 
 
-def _synthesizer_prompt(crux, drivers, financial, ops, tech, human, red_team, document_context=None) -> str:
-    prompt = f"""
-You are the Synthesizer Agent.
+async def synthesizer_agent(enright=None, diagnosis=None, frameworks=None,
+                             structure=None, market_forces=None, portfolio=None,
+                             financial=None, tech=None, human=None, ops=None,
+                             red_team=None, document_context=None) -> dict:
+    """v2 Synthesizer — assembler pattern. Reads memo_contribution from upstream agents;
+    produces The Bet + Executive Summary + quality gate flags + memo markdown.
+    All upstream args are dicts (or None). Returns a dict with markdown + structured fields.
+    """
+    def _mc(x, fallback_field="markdown"):
+        if x is None: return ""
+        if isinstance(x, dict):
+            return x.get("memo_contribution") or x.get(fallback_field) or ""
+        return str(x)
 
-Inputs:
-[CRUX]: {crux}
-[DRIVERS]: {drivers}
-[FINANCIAL]: {financial}
-[OPS]: {ops}
-[TECH]: {tech}
-[HUMAN]: {human}
-[RED TEAM]: {red_team}
+    # Pull the memo_contributions + key structured anchors from upstream
+    diag_memo = _mc(diagnosis)
+    enright_memo = _mc(enright)
+    frameworks_memo = _mc(frameworks)
+    structure_memo = _mc(structure)
+    mf_memo = _mc(market_forces)
+    portfolio_memo = _mc(portfolio)
+    financial_memo = _mc(financial)
+    tech_memo = _mc(tech)
+    human_memo = _mc(human)
+    ops_memo = _mc(ops)
+    red_memo = _mc(red_team)
+
+    # Anchors for The Bet
+    crux_sentence = ""
+    primary_threat = ""
+    if isinstance(diagnosis, dict):
+        crux_sentence = diagnosis.get("crux_sentence", "")
+        primary_threat = diagnosis.get("primary_external_threat", "")
+
+    portfolio_rec = ""
+    portfolio_thesis = ""
+    portfolio_kc = []
+    portfolio_lba = []
+    downstream_instruction = ""
+    if isinstance(portfolio, dict):
+        portfolio_rec = portfolio.get("primary_recommendation", "")
+        downstream_instruction = portfolio.get("downstream_instruction", "")
+        for opt in (portfolio.get("options") or []):
+            if opt.get("name") == portfolio_rec:
+                portfolio_thesis = opt.get("core_thesis", "")
+                portfolio_kc = opt.get("kill_criteria", []) or []
+                portfolio_lba = opt.get("load_bearing_assumptions", []) or []
+                break
+
+    # Red team flags
+    red_revision = False
+    red_suggested = ""
+    if isinstance(red_team, dict):
+        red_revision = bool(red_team.get("revision_required"))
+        red_suggested = red_team.get("suggested_revision", "") or ""
+
+    # Financial gap
+    goal_gap = False
+    goal_gap_text = ""
+    if isinstance(financial, dict):
+        goal_gap = bool(financial.get("goal_gap_flag"))
+        goal_gap_text = financial.get("goal_gap_explanation", "") or ""
+
+    # Gather considerations from all upstream for curation
+    all_considerations = []
+    for agent_out in [diagnosis, enright, frameworks, structure, market_forces,
+                       portfolio, financial, tech, human, ops, red_team]:
+        if isinstance(agent_out, dict):
+            for c in (agent_out.get("considerations") or []):
+                all_considerations.append(c)
+
+    prompt = f"""<your_task>
+Assemble the memo. Do NOT re-analyze. Every claim must trace to an upstream agent's memo_contribution.
+
+Build The Bet from Portfolio's core_thesis + load_bearing_assumptions + kill_criteria.
+Build "What We Are NOT Doing" from Portfolio's what_we_are_giving_up, tradeoff_matrix, and options not selected.
+Run the quality gates. Flag failures loudly.
+</your_task>
+
+<upstream_memo_contributions>
+[DIAGNOSTICIAN]: {diag_memo}
+CRUX sentence: {crux_sentence}
+Primary external threat: {primary_threat}
+
+[ENRIGHT]: {enright_memo}
+
+[FRAMEWORKS]: {frameworks_memo}
+
+[STRUCTURE]: {structure_memo}
+
+[MARKET FORCES]: {mf_memo}
+
+[PORTFOLIO]: {portfolio_memo}
+Primary recommendation: {portfolio_rec}
+Core thesis: {portfolio_thesis}
+Load-bearing assumptions: {json.dumps(portfolio_lba)[:1800]}
+Kill criteria: {json.dumps(portfolio_kc)[:1200]}
+Downstream instruction: {downstream_instruction}
+
+[FINANCIAL]: {financial_memo}
+Goal gap flag: {goal_gap}. Gap: {goal_gap_text}
+
+[TECH]: {tech_memo}
+[HUMAN]: {human_memo}
+[OPS]: {ops_memo}
+
+[RED TEAM]: {red_memo}
+Revision required: {red_revision}. Suggested revision: {red_suggested}
+
+[CONSIDERATIONS FROM UPSTREAM — curate for considerations_for_the_operator]:
+{json.dumps(all_considerations)[:3000]}
+</upstream_memo_contributions>
 """
     if document_context:
-        prompt += f"\n**SOURCE DOCUMENT:**\n{document_context[:8000]}\n\nGround your final strategy in facts from this document.\n\n"
+        prompt += f"\n<document_context>\n{document_context[:3000]}\n</document_context>\n"
 
-    prompt += """You consolidate everything into a McKinsey-style strategy memo with this EXACT structure:
-
-## The Bet
-One single sentence, first thing on the page, in bold. Starts with "We bet that..." and names the wager the strategy makes.
-
-## Executive Summary
-6-10 lines. Front-loaded with the "so what" — the reader should know the recommendation after the first two lines.
-
-## Diagnosis (The Crux)
-2-3 sentences. Reference the crux directly.
-
-## Guiding Policy (with tradeoffs)
-The strategic direction and what we're NOT doing to make it coherent.
-
-## What We Are NOT Doing
-3-5 explicit non-actions. This is a McKinsey discipline — naming what you're giving up sharpens focus. Format:
-- **Not <action>** — because <reason>.
-
-## Coherent Actions
-MECE, sequenced. Reference the Ops output for the 30/60/90 plan.
-
-## KPIs & Leading Indicators
-5-7 metrics. Mix lagging (revenue, retention) and leading (activation, cycle time).
-
-## Key Risks & Mitigations
-Reference the Red Team's top fix. 3 risks max, each with a concrete mitigation.
-
-## 30/60/90 Plan (Summary)
-One line per phase — pulled from the Ops agent.
-
-Rules:
-- Bullet-driven, tight, no corporate filler.
-- Preserve the tradeoffs — don't smooth them over.
-- "What we are NOT doing" is MANDATORY — not optional.
+    prompt += """
+Return JSON:
+{
+  "the_bet": "string — 'We bet that [contrarian claim]. If we are wrong about [specific assumption], the strategy fails because [specific consequence]. We will know within [specific timeframe] by watching [specific metric].'",
+  "executive_summary": "string — max 100 words. Front-loaded. 4-5 sentences: crux, strategic framing, primary recommendation, non-negotiable tradeoff, timeline to resolution.",
+  "crux": "string — from Diagnostician's memo_contribution, condensed.",
+  "strategic_framing": "string — from Enright's memo_contribution. The altitude at which this is being fought.",
+  "guiding_policy": "string — from Portfolio's memo_contribution. Direction + what we're NOT doing.",
+  "what_we_are_not_doing": ["string — strategic non-choice", "string", "string"],
+  "coherent_actions": ["string — from Ops memo_contribution, condensed"],
+  "kpis": {"leading": ["string"], "lagging": ["string"]},
+  "key_risks": ["string — from Red Team memo_contribution, specific not generic"],
+  "thirty_sixty_ninety": {"30": "string", "60": "string", "90": "string"},
+  "considerations_for_the_operator": ["string — curated from upstream considerations, things to sit with"],
+  "passes_monday_morning_test": true,
+  "math_consistent_with_goals": true,
+  "bet_is_falsifiable": true,
+  "survives_red_team": true,
+  "flags_for_operator": ["string — if quality gate failed, explain. Red Team revision_required goes here FIRST if True."],
+  "memo_contribution": "string — full memo as markdown for rendering"
+}
 """
-    return prompt
 
+    data = await _llm_json(SYNTHESIZER_SYSTEM, prompt, max_tokens=4500,
+                           temperature=0.5, timeout=90.0)
+    if data.get("error"):
+        return {
+            "error": data["error"],
+            "the_bet": "Strategy synthesis unavailable — agent error.",
+            "memo_contribution": f"Synthesizer error: {data['error']}",
+            "markdown": f"## Synthesizer Error\n\n{data['error']}",
+            "flags_for_operator": [f"Synthesizer failed: {data['error']}"],
+        }
 
-async def synthesizer_agent_stream(crux: str, drivers: str, financial: str, ops: str, tech: str, human: str, red_team: str, document_context=None):
-    """Streaming variant — yields text deltas. Caller concatenates for the full synthesis."""
-    prompt = _synthesizer_prompt(crux, drivers, financial, ops, tech, human, red_team, document_context)
-    async for delta in _stream_chat(SYNTHESIZER_SYSTEM, prompt, max_tokens=1500, temperature=0.5, timeout=60.0):
-        yield delta
+    # Render the full memo as markdown (also becomes memo_contribution)
+    md = []
+    if data.get("the_bet"):
+        md.append("## The Bet\n")
+        md.append(f"**{data['the_bet']}**\n")
+    if data.get("flags_for_operator"):
+        md.append("\n## ⚠ Flags for the Operator\n")
+        for f in data["flags_for_operator"]:
+            md.append(f"- {f}")
+    if data.get("executive_summary"):
+        md.append("\n## Executive Summary\n")
+        md.append(data["executive_summary"])
+    if data.get("crux"):
+        md.append("\n## Diagnosis (The Crux)\n")
+        md.append(data["crux"])
+    if data.get("strategic_framing"):
+        md.append("\n## Strategic Framing\n")
+        md.append(data["strategic_framing"])
+    if data.get("guiding_policy"):
+        md.append("\n## Guiding Policy\n")
+        md.append(data["guiding_policy"])
+    wwd = data.get("what_we_are_not_doing") or []
+    if wwd:
+        md.append("\n## What We Are NOT Doing\n")
+        for w in wwd:
+            md.append(f"- {w}")
+    ca = data.get("coherent_actions") or []
+    if ca:
+        md.append("\n## Coherent Actions\n")
+        for a in ca:
+            md.append(f"- {a}")
+    kpis = data.get("kpis") or {}
+    if kpis.get("leading") or kpis.get("lagging"):
+        md.append("\n## KPIs & Leading Indicators\n")
+        if kpis.get("leading"):
+            md.append("**Leading:** " + "; ".join(kpis["leading"]))
+        if kpis.get("lagging"):
+            md.append("**Lagging:** " + "; ".join(kpis["lagging"]))
+    kr = data.get("key_risks") or []
+    if kr:
+        md.append("\n## Key Risks & Mitigations\n")
+        for r in kr:
+            md.append(f"- {r}")
+    tsn = data.get("thirty_sixty_ninety") or {}
+    if tsn:
+        md.append("\n## 30 / 60 / 90\n")
+        if tsn.get("30"): md.append(f"**30-day:** {tsn['30']}")
+        if tsn.get("60"): md.append(f"**60-day:** {tsn['60']}")
+        if tsn.get("90"): md.append(f"**90-day:** {tsn['90']}")
+    ccs = data.get("considerations_for_the_operator") or []
+    if ccs:
+        md.append("\n## Considerations for the Operator\n")
+        for c in ccs:
+            md.append(f"- {c}")
 
+    # Quality gate footer (visible so operator knows the self-check happened)
+    gates = [
+        ("Monday Morning Test", data.get("passes_monday_morning_test")),
+        ("Math consistent with goals", data.get("math_consistent_with_goals")),
+        ("Bet is falsifiable", data.get("bet_is_falsifiable")),
+        ("Survives Red Team", data.get("survives_red_team")),
+    ]
+    md.append("\n---\n\n**Quality Gates:** " + " · ".join(
+        f"{'✓' if v else '✗'} {k}" for k, v in gates
+    ))
 
-async def synthesizer_agent(crux: str, drivers: str, financial: str, ops: str, tech: str, human: str, red_team: str, document_context=None):
-    prompt = _synthesizer_prompt(crux, drivers, financial, ops, tech, human, red_team, document_context)
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": SYNTHESIZER_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1500,
-                temperature=0.5
-            ),
-            timeout=60.0
-        )
-        return normalize_markdown(response.choices[0].message.content)
-    except Exception as e:
-        print(f"ERROR in synthesizer_agent: {e}")
-        return f"Error: {str(e)}"
+    final_md = normalize_markdown("\n".join(md))
+    data["markdown"] = final_md
+    data["memo_contribution"] = final_md
+    return data
 
 # ------------------------------------------------------------
 # AGENT 9: DEEP DIVE AGENT
@@ -1318,214 +2410,302 @@ Be concise, specific, grounded in the context. No generic corporate filler.
 # ------------------------------------------------------------
 # AGENT 10: STRATEGY MAP AGENT (Visual Dependency Graph)
 # ------------------------------------------------------------
-async def map_agent(crux: str, drivers: str, financial: str, ops: str, tech: str, human: str, red_team: str):
-    prompt = f"""
-You are the Visual Strategy Mapper.
-Visualize the strategy as a causal dependency graph, INCLUDING feedback loops where they exist.
-Feedback loops (virtuous or vicious cycles) are often the most important strategic dynamics — don't flatten them.
+MAP_SYSTEM = UNIVERSAL_AGENT_PREAMBLE + """
+<your_role>
+You are the Strategy Map Agent. You translate the full pipeline output into a causal graph that visualizes the strategy as a system.
 
-Inputs:
-[CRUX]: {crux}
-[DRIVERS]: {drivers}
-[FINANCIAL]: {financial}
-[OPS]: {ops}
-[TECH]: {tech}
-[HUMAN]: {human}
-[RED TEAM]: {red_team}
+Your output powers the front-end Cytoscape visualization. Focus on CLARITY, not completeness — a map with 15 well-chosen nodes beats a map with 50 noisy ones.
 
-Task:
-Generate a causal dependency graph as a JSON object compatible with Cytoscape.js.
-The JSON must have two lists: "nodes" and "edges", plus an optional "loops" list.
-
-Node format:
-  {{ "data": {{ "id": "unique_id", "label": "Short Label", "type": "action|outcome|goal" }} }}
-
-Edge format:
-  {{ "data": {{ "source": "source_id", "target": "target_id",
-            "weight": <1-10 impact strength>,
-            "polarity": "reinforcing" | "balancing" }} }}
-
-Loops format (optional but strongly encouraged where they exist):
-  {{ "type": "reinforcing" | "balancing", "nodes": ["id1", "id2", "id3"], "description": "one sentence" }}
-
-Rules:
-- Actions (Square) -> Outcomes (Circle) -> Goals (Diamond) is the primary direction,
-  but include backward edges when there are real feedback effects.
-- `polarity: reinforcing` = source INCREASE causes target INCREASE (same direction).
-- `polarity: balancing` = source INCREASE causes target DECREASE (counteracting).
-- Identify 1-2 major feedback loops if present. Label them clearly in the `loops` array.
-- STRICTLY return ONLY the JSON object. No markdown, no text.
+Node types: crux, guiding_policy, action, outcome, risk, assumption.
+Edge types: causes, enables, threatens, depends_on, reinforces, balances.
+</your_role>
 """
-    try:
-        response = await asyncio.wait_for(
-            aclient.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are the Strategy Mapper. Output raw JSON only."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1000,
-                temperature=0.3
-            ),
-            timeout=45.0
-        )
-        content = response.choices[0].message.content
-        content = content.replace("```json", "").replace("```", "").strip()
-        
-        # Validate JSON before returning
-        try:
-            parsed = json.loads(content)
-            return json.dumps(parsed)  # Return clean JSON
-        except json.JSONDecodeError as je:
-            print(f"JSON Parse Error in map_agent: {je}")
-            print(f"Raw content: {content[:500]}")
-            # Return fallback
-            return json.dumps({
-                "nodes": [{"data": {"id": "error", "label": "JSON Error - Check Logs", "type": "goal"}}],
-                "edges": []
-            })
-    except Exception as e:
-        print(f"ERROR in map_agent: {e}")
+
+
+async def map_agent(crux=None, drivers=None, financial=None, ops=None,
+                     tech=None, human=None, red_team=None,
+                     portfolio=None, diagnosis=None, enright=None) -> str:
+    """v2 Strategy Map — node types + edge types + feedback_loops + single_points_of_failure.
+    Returns a JSON STRING (compatible with legacy frontend renderCytoscapeDiagram).
+    """
+    def _to_text(x):
+        if x is None: return ""
+        if isinstance(x, dict): return x.get("markdown") or x.get("memo_contribution") or ""
+        return str(x)
+
+    crux_s = _to_text(crux) if not isinstance(crux, str) else crux
+    drivers_s = _to_text(drivers) if not isinstance(drivers, str) else drivers
+    financial_s = _to_text(financial) if not isinstance(financial, str) else financial
+    ops_s = _to_text(ops) if not isinstance(ops, str) else ops
+    tech_s = _to_text(tech) if not isinstance(tech, str) else tech
+    human_s = _to_text(human) if not isinstance(human, str) else human
+    red_s = _to_text(red_team) if not isinstance(red_team, str) else red_team
+    portfolio_s = _to_text(portfolio) if not isinstance(portfolio, str) else portfolio
+
+    prompt = f"""<your_task>
+Extract the essential nodes from upstream outputs:
+- CRUX: from Diagnostician (1 node)
+- GUIDING POLICY: from Portfolio (1 node)
+- ACTIONS: 3-7 most important actions from Ops
+- OUTCOMES: 3-5 expected outcomes/KPIs
+- RISKS: top 3 attacks from Red Team
+- ASSUMPTIONS: 2-4 most critical load-bearing assumptions
+
+Then draw edges:
+- CAUSES: Action X causes Outcome Y
+- ENABLES: Capability X enables Action Y
+- THREATENS: Risk X threatens Outcome Y
+- DEPENDS_ON: Action X depends on Action Y
+- REINFORCES: Outcome X reinforces Outcome Y (virtuous cycle)
+- BALANCES: Force X balances Force Y
+
+Identify FEEDBACK LOOPS in the graph. Name them.
+Identify CRITICAL PATH — sequence of nodes forming the spine.
+Identify SINGLE POINTS OF FAILURE — nodes whose collapse kills the strategy.
+
+Keep it tight. 15-25 nodes max. 20-40 edges max. Every edge must have an obvious justification from upstream.
+</your_task>
+
+<input_context>
+[CRUX]: {crux_s[:1800]}
+[DRIVERS]: {drivers_s[:1500]}
+[FINANCIAL]: {financial_s[:1800]}
+[OPS]: {ops_s[:2500]}
+[TECH]: {tech_s[:1200]}
+[HUMAN]: {human_s[:1200]}
+[RED TEAM]: {red_s[:1800]}
+[PORTFOLIO]: {portfolio_s[:2800]}
+</input_context>
+
+Return JSON matching this schema (compatible with Cytoscape):
+{{
+  "nodes": [
+    {{"data": {{"id": "crux", "label": "short label", "type": "crux", "source_agent": "diagnosis"}}}}
+  ],
+  "edges": [
+    {{"data": {{"source": "crux", "target": "gp", "weight": 8, "edge_type": "causes"}}}}
+  ],
+  "feedback_loops": [
+    {{"type": "reinforcing", "nodes": ["id1","id2"], "description": "one sentence"}}
+  ],
+  "critical_path": ["node_id_1", "node_id_2"],
+  "single_points_of_failure": ["node_id"],
+  "memo_contribution": "one sentence summary"
+}}
+"""
+
+    data = await _llm_json(MAP_SYSTEM, prompt, max_tokens=3500,
+                           temperature=0.3, timeout=75.0)
+    if data.get("error"):
         return json.dumps({
-            "nodes": [{"data": {"id": "error", "label": "Error Generating Map", "type": "goal"}}],
-            "edges": []
+            "nodes": [{"data": {"id": "error", "label": "Map error", "type": "goal"}}],
+            "edges": [],
+            "error": data["error"],
         })
+    return json.dumps(data)
 
 # ------------------------------------------------------------
 # STREAMING ORCHESTRATOR (V2)
 # ------------------------------------------------------------
 async def run_vanguard_pipeline_stream(inputs):
     """
-    Async Generator that yields JSON chunks as agents finish.
-    Follows the V2 sequential flow:
-    Diagnostician -> Drivers -> Financial -> Ops -> AI/Tech -> Human Factors -> Red Team -> Synthesizer
+    v2 pipeline (per Vanguard OS v2 spec):
+
+    Diagnostician
+        ↓
+    [Enright + Frameworks + Structure + Market Forces] (parallel)
+        ↓
+    Portfolio (binding — produces downstream_instruction contract)
+        ↓
+    [Financial + Tech + Human] (parallel, all bound to Portfolio's chosen option)
+        ↓
+    Ops (executes using Portfolio + Financial + Tech + Human context)
+        ↓
+    Red Team
+        ↓
+    [Synthesizer + Strategy Map] (parallel, reading all upstream)
+
+    All agents now return structured dicts with `memo_contribution` + `markdown`.
+    The Synthesizer is an ASSEMBLER — it reads memo_contribution from every upstream.
     """
-    
-    # Extract inputs
     situation = inputs.get("situation", "")
     goal = inputs.get("goal", "")
     constraints = inputs.get("constraints", "")
+    key_numbers = inputs.get("numbers", "")
+    success_metrics = inputs.get("success_metrics", "")
     document_context = inputs.get("document_context", None)
-    
-    # 0. Market Data (Optional, runs early)
-    yield json.dumps({"type": "status", "data": "Fetching Market Data..."}) + "\n"
-    market_data_out = await market_data_agent(situation, goal)
-    if market_data_out != "No publicly traded companies detected.":
-        yield json.dumps({"type": "market_data", "data": market_data_out}) + "\n"
-    
-    # 1. Diagnostician (CRUX)
-    yield json.dumps({"type": "status", "data": "Running Diagnostician..."}) + "\n"
 
-    # Check for Deep Dive Request
+    # 0. Market Data (ticker ambient context — orthogonal, runs early)
+    yield json.dumps({"type": "status", "data": "Fetching Market Data..."}) + "\n"
+    try:
+        market_data_out = await market_data_agent(situation, goal)
+        if market_data_out != "No publicly traded companies detected.":
+            yield json.dumps({"type": "market_data", "data": market_data_out}) + "\n"
+    except Exception as e:
+        print(f"market_data_agent error: {e}")
+
+    # Deep Dive branch (unchanged)
     if inputs.get("mode") == "deep_dive":
         topic = inputs.get("topic", "")
         context = inputs.get("context", "")
         yield json.dumps({"type": "status", "data": "Deep Diving..."}) + "\n"
         yield json.dumps({"type": "thought", "data": f"Deep Dive: Analyzing '{topic}'..."}) + "\n"
-        
         dd_out = await deep_dive_agent(topic, context)
         yield json.dumps({"type": "deep_dive", "data": dd_out}) + "\n"
         yield json.dumps({"type": "done", "data": "done"}) + "\n"
         return
 
+    # =============================================================
+    # STAGE 1 — Diagnostician (owns Rumelt's CRUX)
+    # =============================================================
     yield json.dumps({"type": "status", "data": "Diagnosing the Crux..."}) + "\n"
-    yield json.dumps({"type": "thought", "data": "Diagnostician: Analyzing situation and constraints..."}) + "\n"
+    yield json.dumps({"type": "thought", "data": "Diagnostician: separating symptom from crux..."}) + "\n"
 
-    # 1. Diagnostician (streaming — users watch this one first)
-    accumulated = []
-    async for delta in diagnostician_agent_stream(situation, goal, constraints, document_context):
-        accumulated.append(delta)
-        yield json.dumps({"type": "delta", "pane": "diagnosisContent", "data": delta}) + "\n"
-    crux_out = normalize_markdown("".join(accumulated))
-    yield json.dumps({"type": "thought", "data": "Diagnostician: Crux identified. Isolating root causes."}) + "\n"
-    yield json.dumps({"type": "diagnostician", "data": crux_out}) + "\n"
-    
-    yield json.dumps({"type": "status", "data": "Applying Strategic Frameworks..."}) + "\n"
-
-    # 1.5 & 1.8 Frameworks & Structure (Parallel) — framework now returns a dict
-    selected_frameworks = inputs.get("frameworks", [])
-    fw_task = asyncio.create_task(framework_agent(situation, goal, selected_frameworks, document_context))
-    struct_task = asyncio.create_task(structure_agent(situation, goal, constraints))
-
-    fw_out, struct_out = await asyncio.gather(fw_task, struct_task)
-    fw_md = fw_out.get("markdown", "") if isinstance(fw_out, dict) else str(fw_out)
-
-    yield json.dumps({"type": "frameworks", "data": fw_out}) + "\n"
-    yield json.dumps({"type": "thought", "data": "Structure: Decision tree logic mapped."}) + "\n"
-    yield json.dumps({"type": "structure", "data": struct_out}) + "\n"
-    
-    yield json.dumps({"type": "status", "data": "Generating Portfolio + Market Forces..."}) + "\n"
-    yield json.dumps({"type": "thought", "data": "Portfolio + Market Forces: Running in parallel..."}) + "\n"
-
-    # Portfolio depends on crux only; Market Forces depends on crux only.
-    # Previously sequential — now parallel. Shaves ~25-40s.
-    effective_crux = crux_out if crux_out and len(crux_out) > 20 else f"Situation: {situation}\nGoal: {goal}"
-
-    portfolio_task = asyncio.create_task(
-        strategy_portfolio_agent(situation, goal, constraints, effective_crux, document_context)
+    diagnosis_out = await diagnostician_agent(
+        situation, goal, constraints, document_context,
+        key_numbers=key_numbers, success_metrics=success_metrics,
     )
-    drivers_task = asyncio.create_task(market_forces_agent(crux_out, document_context))
+    yield json.dumps({"type": "thought", "data": "Diagnostician: crux identified."}) + "\n"
+    yield json.dumps({"type": "diagnostician", "data": diagnosis_out}) + "\n"
 
-    portfolio_out, drivers_out = await asyncio.gather(portfolio_task, drivers_task)
-    # market_forces_agent now returns a dict with structured scores + markdown
-    drivers_md = drivers_out.get("markdown", "") if isinstance(drivers_out, dict) else str(drivers_out)
+    # Extract crux markdown for any legacy string consumers
+    crux_md = diagnosis_out.get("markdown", "") if isinstance(diagnosis_out, dict) else str(diagnosis_out)
 
-    yield json.dumps({"type": "thought", "data": "Portfolio: Options scored and war-gamed."}) + "\n"
+    # =============================================================
+    # STAGE 2 — Parallel analytical block
+    # Enright (SPACE) + Frameworks (meta-tools) + Structure (systems) + Market Forces (PORTER dynamics)
+    # =============================================================
+    yield json.dumps({"type": "status", "data": "Running Enright + Frameworks + Structure + Market Forces in parallel..."}) + "\n"
+    yield json.dumps({"type": "thought", "data": "Climbing Enright's levels + selecting frameworks + mapping structure + pressure-testing forces..."}) + "\n"
+
+    selected_frameworks = inputs.get("frameworks", [])
+
+    enright_task = asyncio.create_task(
+        enright_agent(situation, goal, constraints, key_numbers,
+                      success_metrics, document_context)
+    )
+    fw_task = asyncio.create_task(
+        framework_agent(situation, goal, selected_frameworks, document_context)
+    )
+    struct_task = asyncio.create_task(
+        structure_agent(situation, goal, constraints, document_context, key_numbers)
+    )
+    # Market Forces now runs in the parallel-4 block (needs Enright optionally)
+    # We pass enright=None initially; it will update after enright completes but
+    # asyncio.gather doesn't support mid-execution injection. Trade-off accepted.
+    mf_task = asyncio.create_task(
+        market_forces_agent(crux_md, document_context, enright_output=None,
+                            situation=situation)
+    )
+
+    enright_out, fw_out, struct_out, mf_out = await asyncio.gather(
+        enright_task, fw_task, struct_task, mf_task
+    )
+
+    yield json.dumps({"type": "enright", "data": enright_out}) + "\n"
+    yield json.dumps({"type": "frameworks", "data": fw_out}) + "\n"
+    yield json.dumps({"type": "structure", "data": struct_out}) + "\n"
+    yield json.dumps({"type": "drivers", "data": mf_out}) + "\n"
+
+    mf_md = mf_out.get("markdown", "") if isinstance(mf_out, dict) else str(mf_out)
+
+    # =============================================================
+    # STAGE 3 — Portfolio (Rumelt GUIDING POLICY, binding downstream_instruction)
+    # =============================================================
+    yield json.dumps({"type": "status", "data": "Generating Strategy Portfolio..."}) + "\n"
+    yield json.dumps({"type": "thought", "data": "Portfolio: distinct options, head-to-head tradeoffs, kill criteria..."}) + "\n"
+
+    portfolio_out = await strategy_portfolio_agent(
+        situation, goal, constraints, crux_md, document_context,
+        diagnosis_output=diagnosis_out, enright_output=enright_out,
+        market_forces_output=mf_out, key_numbers=key_numbers,
+    )
     yield json.dumps({"type": "portfolio", "data": portfolio_out}) + "\n"
-    yield json.dumps({"type": "drivers", "data": drivers_out}) + "\n"
 
-    yield json.dumps({"type": "status", "data": "Modeling Financials..."}) + "\n"
+    # =============================================================
+    # STAGE 4 — Parallel execution-layer block
+    # Financial + Tech + Human, all bound to Portfolio's chosen option
+    # =============================================================
+    yield json.dumps({"type": "status", "data": "Modeling Financials + Tech + Human in parallel..."}) + "\n"
 
-    # Financial depends on crux + drivers (markdown form) — start immediately after drivers lands.
-    user_numbers = inputs.get("numbers", "")
-    financial_out = await financial_agent(crux_out, drivers_md, document_context, user_numbers)
-    financial_md = financial_out.get("markdown", "") if isinstance(financial_out, dict) else str(financial_out)
+    financial_task = asyncio.create_task(
+        financial_agent(crux_md, mf_md, document_context, key_numbers,
+                        goal=goal, success_metrics=success_metrics,
+                        portfolio_output=portfolio_out)
+    )
+    tech_task = asyncio.create_task(
+        tech_agent(ops_output=None, document_context=document_context,
+                   portfolio_output=portfolio_out)
+    )
+    human_task = asyncio.create_task(
+        human_factors_agent(ops_output=None, document_context=document_context,
+                             portfolio_output=portfolio_out)
+    )
+
+    financial_out, tech_out, human_out = await asyncio.gather(
+        financial_task, tech_task, human_task
+    )
+
     yield json.dumps({"type": "financial", "data": financial_out}) + "\n"
-
-    yield json.dumps({"type": "status", "data": "Designing Operations..."}) + "\n"
-
-    # 4. Ops Agent
-    ops_out = await ops_agent(crux_out, financial_md, document_context, portfolio_output=portfolio_out)
-    yield json.dumps({"type": "ops", "data": ops_out}) + "\n"
-    
-    yield json.dumps({"type": "status", "data": "Evaluating Technology & Human Factors..."}) + "\n"
-    
-    # 5 & 6. Tech and Human Factors (Can run in parallel)
-    tech_task = asyncio.create_task(tech_agent(ops_out, document_context))
-    human_task = asyncio.create_task(human_factors_agent(ops_out, document_context))
-    
-    tech_out, human_out = await asyncio.gather(tech_task, human_task)
-    
     yield json.dumps({"type": "tech", "data": tech_out}) + "\n"
     yield json.dumps({"type": "human_factors", "data": human_out}) + "\n"
-    
-    yield json.dumps({"type": "status", "data": "Red Teaming Strategy..."}) + "\n"
-    
-    # 7. Red Team
-    yield json.dumps({"type": "thought", "data": "Red Team: Challenging assumptions (CFO/COO/CTO perspectives)..."}) + "\n"
-    red_team_out = await red_team_agent_v2(crux_out, drivers_md, financial_md, ops_out, tech_out, human_out, document_context, portfolio=portfolio_out)
+
+    # =============================================================
+    # STAGE 5 — Ops (Rumelt COHERENT ACTIONS, reads Portfolio + Financial/Tech/Human)
+    # =============================================================
+    yield json.dumps({"type": "status", "data": "Designing Operations plan..."}) + "\n"
+
+    ops_out = await ops_agent(
+        crux_md, financial_out, document_context,
+        portfolio_output=portfolio_out, tech_output=tech_out,
+        human_output=human_out, diagnosis_output=diagnosis_out,
+    )
+    yield json.dumps({"type": "ops", "data": ops_out}) + "\n"
+
+    # =============================================================
+    # STAGE 6 — Red Team (attacks the whole recommendation)
+    # =============================================================
+    yield json.dumps({"type": "status", "data": "Red Team attacking the recommendation..."}) + "\n"
+    yield json.dumps({"type": "thought", "data": "Red Team: targeting load-bearing assumptions directly..."}) + "\n"
+
+    red_team_out = await red_team_agent_v2(
+        diagnosis_out, mf_out, financial_out, ops_out, tech_out, human_out,
+        document_context, portfolio=portfolio_out,
+    )
     yield json.dumps({"type": "red_team", "data": red_team_out}) + "\n"
-    
-    yield json.dumps({"type": "status", "data": "Synthesizing Final Strategy..."}) + "\n"
-    
-    # 8. Synthesizer & Strategy Map (Parallel)
-    yield json.dumps({"type": "thought", "data": "Synthesizer: Consolidating final strategy..."}) + "\n"
-    yield json.dumps({"type": "thought", "data": "Mapper: Visualizing causal logic..."}) + "\n"
-    
-    # Synthesizer streams tokens directly; strategy map runs in parallel via a side task.
-    map_task = asyncio.create_task(map_agent(crux_out, drivers_md, financial_md, ops_out, tech_out, human_out, red_team_out))
 
-    synth_accumulated = []
-    async for delta in synthesizer_agent_stream(crux_out, drivers_md, financial_md, ops_out, tech_out, human_out, red_team_out, document_context):
-        synth_accumulated.append(delta)
-        yield json.dumps({"type": "delta", "pane": "synthesizerContent", "data": delta}) + "\n"
-    final_strategy = normalize_markdown("".join(synth_accumulated))
+    # =============================================================
+    # STAGE 7 — Synthesizer + Strategy Map (parallel)
+    # Synthesizer is an ASSEMBLER — reads memo_contribution from every upstream.
+    # =============================================================
+    yield json.dumps({"type": "status", "data": "Synthesizing memo + mapping causal graph..."}) + "\n"
+    yield json.dumps({"type": "thought", "data": "Synthesizer: assembling The Bet + running quality gates..."}) + "\n"
 
-    map_out = await map_task
+    synth_task = asyncio.create_task(
+        synthesizer_agent(
+            enright=enright_out, diagnosis=diagnosis_out,
+            frameworks=fw_out, structure=struct_out,
+            market_forces=mf_out, portfolio=portfolio_out,
+            financial=financial_out, tech=tech_out, human=human_out,
+            ops=ops_out, red_team=red_team_out,
+            document_context=document_context,
+        )
+    )
+    map_task = asyncio.create_task(
+        map_agent(
+            crux=diagnosis_out, drivers=mf_out, financial=financial_out,
+            ops=ops_out, tech=tech_out, human=human_out, red_team=red_team_out,
+            portfolio=portfolio_out, diagnosis=diagnosis_out, enright=enright_out,
+        )
+    )
 
-    yield json.dumps({"type": "synthesizer", "data": final_strategy}) + "\n"
+    synth_out, map_out = await asyncio.gather(synth_task, map_task)
+
+    # Synthesizer output is a dict; frontend expects a string OR dict for "synthesizer"
+    # Emit the full dict so the new memo renderer can pick up quality gates.
+    yield json.dumps({"type": "synthesizer", "data": synth_out}) + "\n"
     yield json.dumps({"type": "strategy_map", "data": map_out}) + "\n"
-    
+
     yield json.dumps({"type": "status", "data": "Mission Complete."}) + "\n"
     yield json.dumps({"type": "done", "data": "done"}) + "\n"
 
