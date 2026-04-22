@@ -1,0 +1,67 @@
+# ============================================================
+# Vanguard OS — .gitignore
+# ============================================================
+
+# ---- Secrets ----
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# ---- Python ----
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Databases + user data ----
+vanguard_missions.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# ---- Historical backups (huge, not needed in repo) ----
+archive/
+
+# ---- Local config / IDE ----
+.claude/
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# ---- Logs / scratch ----
+*.log
+/tmp/
+.DS_Store
+
+# ---- Node (if you ever add it) ----
+node_modules/
+
+# ---- Backup files ----
+*.bak
+*.backup
+*.orig
+
+# ---- Large binary artifacts from runs ----
+*.pptx
+*.docx
+*.pdf
+!docs/**/*.pdf

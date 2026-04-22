@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Vanguard — Strategic Intelligence</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Typography: Fraunces (editorial serif) + Inter (UI) + JetBrains Mono (data) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="static/vanguard.css">
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  </script>
+</head>
+
+<body>
+
+  <div class="app-container">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">V</div>
+        <div class="brand-text">Vanguard</div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-label">Mission Control</div>
+        <div class="nav-item active" onclick="location.reload()">
+          <i data-lucide="plus" class="nav-icon"></i> New Strategy
+        </div>
+        <div class="nav-item" id="marketMapBtn">
+          <i data-lucide="map" class="nav-icon"></i> Market Map
+        </div>
+        <div class="nav-item" id="openCmdkBtn">
+          <i data-lucide="command" class="nav-icon"></i> Command Palette
+          <span class="kbd-hint">⌘K</span>
+        </div>
+      </div>
+
+      <div class="nav-section" style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+        <div class="nav-label">History</div>
+        <div class="session-list" id="sessionList">
+          <!-- Sessions injected here -->
+        </div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-label">Presets</div>
+        <select class="titanium-select" id="presets" style="width: 100%;">
+          <option value="">Load Preset...</option>
+          <option value="telco">Telecom Turnaround</option>
+          <option value="saas">SaaS Expansion</option>
+          <option value="ops">Ops Efficiency</option>
+        </select>
+      </div>
+
+      <!-- Live Agent Terminal -->
+      <div class="nav-section" style="flex: 1; min-height: 150px; display: flex; flex-direction: column;">
+        <div class="nav-label" style="color: var(--accent-success); opacity: 0.8;">LIVE AGENT FEED</div>
+        <div id="agentTerminal" class="agent-terminal">
+          <div class="terminal-line">System initialized.</div>
+          <div class="terminal-line">Waiting for mission...</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Status Bar -->
+      <div class="status-bar">
+        <div class="agent-progress-bar" id="globalProgressBar"></div>
+
+        <!-- Toggles -->
+        <div class="toggle-group" style="display: flex; gap: 8px; z-index: 10;">
+          <button id="sidebarToggleBtn" class="toggle-btn-static" title="Toggle Sidebar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12h18M3 6h18M3 18h18" />
+            </svg>
+          </button>
+          <button id="inputToggleBtn" class="toggle-btn-static" title="Toggle Inputs">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35" />
+            </svg>
+          </button>
+        </div>
+
+        <button id="themeToggle" class="theme-toggle" title="Toggle Light/Dark Mode">
+          <svg class="sun-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="moon-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" style="display:none">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+
+        <div class="agent-island">
+          <div class="agent-dot" id="agentDot"></div>
+          <span class="agent-status-text" id="statusText">System Ready</span>
+        </div>
+      </div>
+
+      <div class="split-view">
+        <!-- Input Panel -->
+        <div class="input-panel">
+          <div style="margin-bottom: 24px;">
+            <h1 class="brand-header-gradient">
+              VANGUARD OS
+            </h1>
+            <p class="brand-subtitle">
+              Your AI strategic copilot. <span class="brand-subtitle-highlight">Instant diagnosis, decision trees, and
+                battle-tested frameworks.</span>
+            </p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label"><i data-lucide="map-pin" class="label-icon"></i> Situation</label>
+            <textarea id="situation" class="titanium-input" placeholder="Market dynamics, competitive threats..."
+              style="height: 60px;"></textarea>
+            <div style="margin-top: 8px; display: flex; gap: 8px; align-items: center;">
+              <input type="file" id="docUpload" accept=".pdf,.docx,.doc" style="display: none;">
+              <button id="uploadDocBtn" class="btn-secondary"
+                style="flex: 0 0 auto; font-size: 12px; padding: 6px 12px;">
+                <i data-lucide="file-text" style="width:12px;height:12px;vertical-align:-1px;"></i> Upload Document
+              </button>
+              <span id="docUploadStatus" style="font-size: 11px; color: var(--text-tertiary);"></span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label"><i data-lucide="target" class="label-icon"></i> Goal</label>
+            <textarea id="goal" class="titanium-input"
+              placeholder="Desired end state (e.g., 10% growth, #1 market share)..." style="height: 80px;"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label"><i data-lucide="gauge" class="label-icon"></i> Success Metrics</label>
+            <textarea id="successMetrics" class="titanium-input"
+              placeholder="How will you measure success? (e.g., $500M ARR, 50k users, 40% margin)"
+              style="height: 50px;"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label"><i data-lucide="alert-triangle" class="label-icon"></i> Constraints</label>
+            <textarea id="constraints" class="titanium-input" placeholder="Budget, time, regulatory, talent..."
+              style="height: 60px;"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label"><i data-lucide="dollar-sign" class="label-icon"></i> Key Numbers (Optional)</label>
+            <textarea id="numbers" class="titanium-input" placeholder="Revenue, costs, churn rate..."
+              style="height: 50px;"></textarea>
+            <div style="margin-top: 8px; display: flex; gap: 8px; align-items: center;">
+              <input type="file" id="fileUpload" accept=".csv,.xlsx,.xls" style="display: none;">
+              <button id="uploadBtn" class="btn-secondary"
+                style="flex: 0 0 auto; font-size: 12px; padding: 6px 12px;">
+                <i data-lucide="table" style="width:12px;height:12px;vertical-align:-1px;"></i> Upload CSV/Excel
+              </button>
+              <span id="uploadStatus" style="font-size: 11px; color: var(--text-tertiary);"></span>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+            <div class="form-group">
+              <label class="form-label">Problem Type</label>
+              <select id="problemType" class="titanium-select">
+                <option value="general">General Strategy</option>
+                <option value="profitability">Profitability</option>
+                <option value="market_entry">Market Entry</option>
+                <option value="turnaround">Turnaround</option>
+                <option value="product">Product / GTM</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Frameworks</label>
+              <div class="custom-select-wrapper">
+                <div class="custom-select-trigger" id="frameworksBtn">
+                  <span>Select...</span>
+                  <small>▼</small>
+                </div>
+                <div class="custom-options" id="frameworksList">
+                  <label class="option"><input type="checkbox" value="Porter Five Forces"> Porter 5 Forces</label>
+                  <label class="option"><input type="checkbox" value="SWOT Analysis"> SWOT Analysis</label>
+                  <label class="option"><input type="checkbox" value="PESTEL"> PESTEL (Macro)</label>
+                  <label class="option"><input type="checkbox" value="Blue Ocean Strategy"> Blue Ocean</label>
+                  <label class="option"><input type="checkbox" value="7 Powers"> 7 Powers</label>
+                  <label class="option"><input type="checkbox" value="Jobs to be Done"> Jobs to be Done</label>
+                  <label class="option"><input type="checkbox" value="Value Chain"> Value Chain</label>
+                  <label class="option"><input type="checkbox" value="Financial diagnostics" checked> Financials</label>
+                  <label class="option"><input type="checkbox" value="Stakeholder Mapping"> Stakeholder Map</label>
+                  <label class="option"><input type="checkbox" value="Communication Mapping"> Comm Map</label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-top: 16px;">
+            <label class="form-label">Active Agents (Modular)</label>
+            <div class="custom-select-wrapper">
+              <div class="custom-select-trigger" id="agentsBtn">
+                <span>All Agents Active</span>
+                <small>▼</small>
+              </div>
+              <div class="custom-options" id="agentsList">
+                <label class="option"><input type="checkbox" value="diagnostician" checked> Diagnostician</label>
+                <label class="option"><input type="checkbox" value="frameworks" checked> Frameworks</label>
+                <label class="option"><input type="checkbox" value="structure" checked> Decision Tree</label>
+                <label class="option"><input type="checkbox" value="drivers" checked> Market Forces</label>
+                <label class="option"><input type="checkbox" value="financial" checked> Financial Agent</label>
+                <label class="option"><input type="checkbox" value="ops" checked> Ops Agent</label>
+                <label class="option"><input type="checkbox" value="tech" checked> AI/Tech Agent</label>
+                <label class="option"><input type="checkbox" value="human_factors" checked> Human Factors</label>
+                <label class="option"><input type="checkbox" value="red_team" checked> Red Team</label>
+                <label class="option"><input type="checkbox" value="synthesizer" checked> Synthesizer</label>
+              </div>
+            </div>
+            <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 4px;">
+              Core agents (Kernel, Strategy) always run. Uncheck others to speed up.
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-top: 12px;">
+            <label class="form-label">Refinement Notes</label>
+            <textarea id="refineNotes" class="titanium-input" placeholder="Add feedback to refine the next run..."
+              style="height: 60px;"></textarea>
+          </div>
+
+          <div style="display: flex; gap: 12px;">
+            <button id="runBtn" class="btn-primary" style="flex: 2;">Run Vanguard</button>
+            <button id="refineBtn" class="btn-primary"
+              style="flex: 1; background: #333; box-shadow: none;">Refine</button>
+          </div>
+        </div>
+
+        <!-- Output Panel -->
+        <div class="output-panel">
+          <div class="tabs-bar">
+            <!-- Diagnosis Group -->
+            <div class="nav-group diagnosis-group">
+              <div class="group-label">DIAGNOSIS</div>
+              <div class="group-tabs">
+                <div class="tab-pill active" data-tab="synthesizer">Synthesizer</div>
+                <div class="tab-pill" data-tab="diagnosis">Diagnosis</div>
+                <div class="tab-pill" data-tab="market_forces">Market Forces</div>
+              </div>
+            </div>
+
+            <!-- Strategy Group -->
+            <div class="nav-group strategy-group">
+              <div class="group-label">STRATEGY</div>
+              <div class="group-tabs">
+                <div class="tab-pill" data-tab="frameworks">Frameworks</div>
+                <div class="tab-pill" data-tab="structure">Decision Tree</div>
+                <div class="tab-pill" data-tab="portfolio">Portfolio</div>
+              </div>
+            </div>
+
+            <!-- Execution Group -->
+            <div class="nav-group execution-group">
+              <div class="group-label">EXECUTION</div>
+              <div class="group-tabs">
+                <div class="tab-pill" data-tab="financials">Financials</div>
+                <div class="tab-pill" data-tab="ops">Ops Plan</div>
+                <div class="tab-pill" data-tab="tech_human">Tech & Human</div>
+                <div class="tab-pill" data-tab="red_team">Red Team</div>
+              </div>
+            </div>
+
+            <div style="flex: 1;"></div>
+            <div class="tab-pill" id="memoModeBtn" style="margin-right: 12px;">Memo Mode</div>
+            <div class="tab-pill download-action" id="downloadAllBtn">Download All</div>
+          </div>
+
+          <div class="output-content">
+            <div id="tab-synthesizer" class="output-pane active">
+              <div id="strategyMapContainer" class="strategy-map-container" style="display: none;"></div>
+
+              <!-- Preset hero — shown only when no run has completed yet -->
+              <div id="presetHero" class="preset-hero visible">
+                <div class="preset-hero-title">
+                  Ready to <span class="accent">diagnose</span> a strategic problem.
+                </div>
+                <p class="preset-hero-lede">
+                  Enter a situation on the left and click <strong>Run Vanguard</strong>, or start from a preset below. Vanguard decomposes the problem across 12 agents and returns a structured memo.
+                </p>
+                <div class="preset-cards">
+                  <div class="preset-card" data-preset="telco">
+                    <span class="preset-card-eyebrow">Turnaround</span>
+                    <div class="preset-card-title">Telecom operator facing flat revenue & churn</div>
+                    <div class="preset-card-desc">Restore 8-10% profitable growth in 18-24 months within a $2M capex envelope.</div>
+                  </div>
+                  <div class="preset-card" data-preset="saas">
+                    <span class="preset-card-eyebrow">Growth</span>
+                    <div class="preset-card-title">SaaS expansion into mid-market</div>
+                    <div class="preset-card-desc">Scale from SMB to mid-market without losing unit economics or product focus.</div>
+                  </div>
+                  <div class="preset-card" data-preset="ops">
+                    <span class="preset-card-eyebrow">Efficiency</span>
+                    <div class="preset-card-title">Operating-cost takeout at scale</div>
+                    <div class="preset-card-desc">Cut 15-20% of operating costs without degrading customer experience.</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Memo masthead populated by JS after a successful run -->
+              <div id="memoMasthead" class="memo-masthead" style="display:none;"></div>
+
+              <div id="synthesizerContent"></div>
+            </div>
+
+            <div id="tab-diagnosis" class="output-pane">
+              <pre id="diagnosisContent" class="mono-text"></pre>
+            </div>
+
+            <div id="tab-frameworks" class="output-pane">
+              <pre id="frameworksContent"></pre>
+            </div>
+
+            <div id="tab-structure" class="output-pane">
+              <div id="mermaidContainer"></div>
+              <pre id="structureContent" class="mono-text" style="display:none;"></pre>
+            </div>
+
+            <div id="tab-portfolio" class="output-pane">
+              <pre id="portfolioContent"></pre>
+            </div>
+
+            <div id="tab-market_forces" class="output-pane">
+              <pre id="marketForcesContent"></pre>
+            </div>
+
+            <div id="tab-financials" class="output-pane">
+              <div id="financialsContent" class="financials-container">
+                <div class="financials-empty">Run a mission to see financial projections.</div>
+              </div>
+            </div>
+
+            <div id="tab-ops" class="output-pane">
+              <pre id="opsContent"></pre>
+            </div>
+
+            <div id="tab-tech_human" class="output-pane">
+              <div class="split-columns">
+                <section class="split-col">
+                  <div class="pane-eyebrow">AI &amp; Technology</div>
+                  <div id="techContent" class="pane-body"></div>
+                </section>
+                <section class="split-col">
+                  <div class="pane-eyebrow">Human Factors</div>
+                  <div id="humanContent" class="pane-body"></div>
+                </section>
+              </div>
+            </div>
+
+            <div id="tab-red_team" class="output-pane">
+              <pre id="redTeamContent" style="color: #FF8A80;"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Context Menu -->
+  <div id="vanguardContextMenu" class="context-menu">
+    <div class="menu-item" id="ctxDeepDive">
+      <span class="menu-icon">🔍</span> Deep Dive Analysis
+    </div>
+  </div>
+
+  <!-- Deep Dive Modal -->
+  <div id="deepDiveModal" class="modal-overlay">
+    <div class="modal-window">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span style="color: var(--accent-primary);">VANGUARD</span> INTELLIGENCE
+        </div>
+        <button class="modal-close" id="closeModalBtn">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="deepDiveContent" class="deep-dive-content">
+          Initializing deep scan...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="memoExitBtn">Exit Memo Mode</div>
+
+  <!-- Market Mapping Overlay -->
+  <div id="marketMapOverlay" class="market-map-overlay">
+    <div class="market-map-container">
+      <!-- Header -->
+      <div class="market-map-header">
+        <div class="market-map-title">
+          <span class="market-map-icon">🗺️</span>
+          <span>MARKET MAPPING</span>
+        </div>
+        <button class="market-map-close" id="closeMarketMapBtn">×</button>
+      </div>
+
+      <!-- Input Panel -->
+      <div class="market-map-input">
+        <div class="market-input-group">
+          <label class="market-input-label">
+            <span class="label-icon">🏢</span> Industry / Market
+          </label>
+          <input type="text" id="marketIndustry" class="market-input"
+            placeholder="e.g., Electric Vehicles, Cloud Computing, Fintech" />
+        </div>
+
+        <div class="market-input-row">
+          <div class="market-input-group">
+            <label class="market-input-label">
+              <span class="label-icon">🌍</span> Geographic Scope
+            </label>
+            <input type="text" id="marketGeo" class="market-input" placeholder="e.g., Global, North America, APAC" />
+          </div>
+
+          <div class="market-input-group">
+            <label class="market-input-label">
+              <span class="label-icon">👥</span> Customer Segments
+            </label>
+            <input type="text" id="marketSegments" class="market-input" placeholder="e.g., Enterprise, SMB, Consumer" />
+          </div>
+        </div>
+
+        <button class="market-generate-btn" id="generateMarketMapBtn">
+          <span>⚡</span> Generate Market Map
+        </button>
+      </div>
+
+      <!-- Output Area -->
+      <div class="market-map-output" id="marketMapOutput" style="display: none;">
+
+        <!-- Competitor Landscape -->
+        <div class="market-section">
+          <h2 class="market-section-title">
+            <span class="section-icon">⚔️</span> Competitive Landscape
+          </h2>
+          <div id="competitorGrid" class="competitor-grid"></div>
+        </div>
+
+        <!-- Customer Segmentation -->
+        <div class="market-section">
+          <h2 class="market-section-title">
+            <span class="section-icon">👥</span> Customer Segments
+          </h2>
+          <div id="segmentGrid" class="segment-grid"></div>
+        </div>
+
+        <!-- Value Chain -->
+        <div class="market-section">
+          <h2 class="market-section-title">
+            <span class="section-icon">🔗</span> Value Chain
+          </h2>
+          <div id="valueChain" class="value-chain"></div>
+        </div>
+
+        <!-- Disruptive Threats -->
+        <div class="market-section">
+          <h2 class="market-section-title">
+            <span class="section-icon">⚠️</span> Disruptive Threats
+          </h2>
+          <div id="threatsPanel" class="threats-panel"></div>
+        </div>
+
+        <!-- Market Attractiveness Scorecard -->
+        <div class="market-section">
+          <h2 class="market-section-title">
+            <span class="section-icon">📊</span> Market Attractiveness Scorecard
+          </h2>
+          <div id="scorecard" class="scorecard"></div>
+        </div>
+
+      </div>
+
+      <!-- Loading State -->
+      <div class="market-loading" id="marketLoading" style="display: none;">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Analyzing market structure...</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Command Palette (Cmd+K) -->
+  <div id="cmdkBackdrop" class="cmdk-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="cmdk-panel" role="none">
+      <div class="cmdk-input-row">
+        <i data-lucide="search" style="width:18px;height:18px;"></i>
+        <input id="cmdkInput" class="cmdk-input" type="text" placeholder="Jump to a section, load a preset, or run an action…" autocomplete="off" spellcheck="false">
+        <span class="cmdk-hint">ESC</span>
+      </div>
+      <div id="cmdkList" class="cmdk-list"></div>
+    </div>
+  </div>
+
+  <script src="static/vanguard.js"></script>
+  <script>
+    // Initialize Lucide icons (idempotent — safe to re-call)
+    if (window.lucide) lucide.createIcons();
+  </script>
+</body>
+
+</html>

@@ -1,0 +1,25 @@
+# Vanguard OS — Python dependencies
+# Install: pip install -r requirements.txt
+
+# Web server
+fastapi==0.121.3
+uvicorn==0.38.0
+pydantic==2.12.4
+python-multipart==0.0.20
+
+# LLM
+openai==2.8.1
+python-dotenv==1.2.1
+
+# Data ingestion
+pandas==2.3.3
+pypdf==6.7.4
+pdfplumber==0.11.8
+python-docx==1.2.0
+
+# Financial modeling
+numpy==2.0.2
+numpy-financial==1.0.0
+
+# Market data
+yfinance==1.2.0
