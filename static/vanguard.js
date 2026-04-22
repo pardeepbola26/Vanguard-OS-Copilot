@@ -296,7 +296,7 @@ fileInput.addEventListener("change", async (e) => {
         const formData = new FormData();
         formData.append("file", file);
 
-        const res = await fetch("http://127.0.0.1:8000/vanguard/upload", {
+        const res = await fetch("/vanguard/upload", {
             method: "POST",
             body: formData
         });
@@ -343,7 +343,7 @@ docInput.addEventListener("change", async (e) => {
         const formData = new FormData();
         formData.append("file", file);
 
-        const res = await fetch("http://127.0.0.1:8000/vanguard/upload-document", {
+        const res = await fetch("/vanguard/upload-document", {
             method: "POST",
             body: formData
         });
@@ -432,7 +432,7 @@ async function callVanguard(isRefine = false) {
         // Prime every pane with a loading skeleton so the UI looks intentional while agents run
         primeAllPanesForLoading();
 
-        const url = "http://127.0.0.1:8000/vanguard/stream";
+        const url = "/vanguard/stream";
 
         if (isRefine) {
             const refineNotes = $("refineNotes").value;
@@ -545,7 +545,7 @@ async function callVanguard(isRefine = false) {
             saveSession(payload, outputs);
 
             // Durable backup to server (fire-and-forget; failure is non-fatal)
-            fetch("http://127.0.0.1:8000/vanguard/history", {
+            fetch("/vanguard/history", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ inputs: payload, outputs })
@@ -1525,7 +1525,7 @@ if (generateMarketMapBtn) {
         $('marketLoading').style.display = 'block';
 
         try {
-            const response = await fetch('http://127.0.0.1:8000/market_map', {
+            const response = await fetch('/market_map', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ industry, geo_scope, segments })

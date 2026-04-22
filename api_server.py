@@ -72,6 +72,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ------------------------------------------------------------
+# Optional HTTP Basic Auth — protects the deployed app from random visitors.
+# Activates ONLY when both BASIC_AUTH_USER and BASIC_AUTH_PASS env vars are set.
+# Local dev: leave them unset → no auth, app works as before.
+# Production: set them in the host's environment (Render / Railway / Fly) and
+# every request is required to include `Authorization: Basic <base64>`.
+# ------------------------------------------------------------
+import base64 as _b64
+import secrets as _secrets
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response as _Response
+
+
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, username: str, password: str):
+        super().__init__(app)
+        self._user = username
+        self._pass = password
+        # Pre-compute expected header value in constant-time-comparable form
+        token = _b64.b64encode(f"{username}:{password}".encode()).decode()
+        self._expected = f"Basic {token}"
+
+    async def dispatch(self, request, call_next):
+        auth = request.headers.get("authorization", "")
+        if not _secrets.compare_digest(auth, self._expected):
+            return _Response(
+                content="Authentication required",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Vanguard OS"'},
+            )
+        return await call_next(request)
+
+
+_auth_user = os.getenv("BASIC_AUTH_USER")
+_auth_pass = os.getenv("BASIC_AUTH_PASS")
+if _auth_user and _auth_pass:
+    app.add_middleware(BasicAuthMiddleware, username=_auth_user, password=_auth_pass)
+    print(f"[startup] HTTP Basic Auth enabled for user '{_auth_user}'")
+else:
+    print("[startup] HTTP Basic Auth DISABLED (BASIC_AUTH_USER/PASS not set — ok for local dev)")
+
+
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -555,7 +598,14 @@ def generate_slides(request: SlidesInput):
 
 
 if __name__ == "__main__":
-    uvicorn.run("api_server:app", host="127.0.0.1", port=8000, reload=True)
+    # Host & port come from env so local dev and cloud deploys share the same entrypoint.
+    # Locally: defaults to 127.0.0.1:8000 with hot-reload on.
+    # On a host (Render/Railway/Fly): set HOST=0.0.0.0, PORT=$PORT, and the platform
+    # will route traffic to the dynamically-assigned port.
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    reload_mode = os.getenv("RELOAD", "true").lower() == "true"
+    uvicorn.run("api_server:app", host=host, port=port, reload=reload_mode)
 
 # ------------------------------------------------------------
 # PPTX Export Logic
