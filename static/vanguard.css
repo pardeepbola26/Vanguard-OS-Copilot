@@ -4593,3 +4593,486 @@ body.memo-mode .pane-loading {
   margin-top: 6px;
   padding-left: 20px;
 }
+
+/* ============================================================
+   v2 RENDERERS — Frameworks-v2, Market Forces-v2, The Move, Posture,
+   Strategic Groups, Temporal, Profit Pool, Memo Contribution cards
+   ============================================================ */
+
+/* ---- The Move — primary recommendation block (synthesizer) ---- */
+
+#synthesizerContent h2:first-of-type + p + h2,  /* after The Bet */
+.the-move-block {
+  margin-top: 24px;
+}
+
+#synthesizerContent blockquote {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-style: italic;
+  line-height: 1.5;
+  color: var(--text-primary);
+  margin: 12px 0 16px;
+  padding: 12px 0 12px 20px;
+  border-left: 3px solid var(--accent-primary);
+  background: linear-gradient(90deg, rgba(217, 119, 87, 0.05), transparent);
+}
+
+/* ---- Frameworks v2 cards ---- */
+
+.framework-cards-v2 {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.framework-card-v2 {
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  transition: border-color 180ms var(--ease-out);
+}
+
+.framework-card-v2:hover {
+  border-color: var(--glass-border-light);
+}
+
+.framework-card-head-v2 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.framework-name-v2 {
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.framework-category {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.85;
+}
+
+.framework-level {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 1px dashed var(--glass-border);
+  border-radius: 3px;
+}
+
+.framework-why-v2 {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-style: italic;
+  margin-bottom: 10px;
+  line-height: 1.6;
+}
+
+.framework-why-v2 strong {
+  color: var(--text-primary);
+  font-style: normal;
+}
+
+.framework-application {
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.7;
+  margin-bottom: 12px;
+}
+
+.framework-application p { margin-bottom: 8px; }
+.framework-application strong { color: var(--text-primary); }
+
+.framework-insight {
+  background: rgba(217, 119, 87, 0.06);
+  border-left: 3px solid var(--accent-primary);
+  padding: 10px 14px;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin-bottom: 10px;
+}
+
+.framework-insight-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent-primary);
+  margin-bottom: 4px;
+}
+
+.framework-insight-body {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.framework-misses {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  padding: 8px 10px;
+  border-left: 2px dashed var(--text-tertiary);
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.framework-misses strong {
+  color: var(--text-tertiary);
+}
+
+/* Rejected frameworks */
+.frameworks-rejected {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rejected-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 14px;
+  align-items: baseline;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.015);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.rejected-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  text-decoration: line-through;
+  text-decoration-color: rgba(200, 87, 77, 0.4);
+}
+
+.rejected-why {
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.55;
+}
+
+/* ---- Market Forces v2 ---- */
+
+.forces-panel-v2 {
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 22px;
+}
+
+.forces-list-v2 {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.force-row-v2 {
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.015);
+  border-left: 3px solid transparent;
+  transition: border-color 200ms var(--ease-out);
+}
+
+.force-row-v2.force-determinative {
+  border-left-color: var(--accent-primary);
+  background: rgba(217, 119, 87, 0.06);
+  box-shadow: 0 0 0 1px rgba(217, 119, 87, 0.2);
+  position: relative;
+}
+
+.force-row-v2.force-determinative::after {
+  content: "PRIMARY";
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--accent-primary);
+  padding: 2px 8px;
+  border: 1px solid rgba(217, 119, 87, 0.4);
+  border-radius: 3px;
+  background: rgba(217, 119, 87, 0.1);
+}
+
+.force-head-v2 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.force-name-v2 {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
+}
+
+.force-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.force-score-v2 {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.force-arrow-v2 {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  width: 20px;
+  text-align: center;
+}
+
+.force-horizon {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  padding: 2px 6px;
+  border: 1px dashed var(--glass-border);
+  border-radius: 3px;
+}
+
+.force-bar-track-v2 {
+  height: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.force-bar-v2 {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 500ms var(--ease-out);
+}
+
+.force-evidence,
+.force-implication {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  padding: 6px 0;
+}
+
+.force-evidence-label,
+.force-implication-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-primary);
+  margin-right: 6px;
+  font-weight: 500;
+}
+
+.force-implication {
+  padding-top: 8px;
+  border-top: 1px dashed rgba(217, 119, 87, 0.12);
+}
+
+/* Most determinative callout v2 */
+.forces-callout-v2 {
+  background: linear-gradient(135deg, rgba(217, 119, 87, 0.1), rgba(217, 119, 87, 0.02));
+  border: 1px solid rgba(217, 119, 87, 0.35);
+  border-left: 3px solid var(--accent-primary);
+  border-radius: var(--radius-md);
+  padding: 18px 22px;
+  margin-top: 18px;
+}
+
+.forces-callout-label-v2 {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent-primary);
+  margin-bottom: 8px;
+}
+
+.forces-callout-body-v2 {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.forces-callout-body-v2 strong {
+  color: var(--accent-primary);
+  font-weight: 500;
+}
+
+.forces-callout-secondary {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.forces-callout-secondary span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-right: 6px;
+}
+
+/* Generic strategy posture card */
+.posture-card {
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  margin-top: 18px;
+}
+
+.posture-card.posture-warning {
+  border-color: rgba(212, 167, 74, 0.4);
+  background: rgba(212, 167, 74, 0.06);
+}
+
+.posture-value {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-style: italic;
+  color: var(--text-primary);
+  margin: 6px 0;
+  letter-spacing: -0.01em;
+  text-transform: capitalize;
+}
+
+.posture-risk {
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  margin-top: 8px;
+}
+
+/* Strategic groups */
+.strat-groups-card {
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  margin-top: 18px;
+}
+
+.strat-groups-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.strat-group-row {
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--text-tertiary);
+}
+
+.strat-group-name {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 13.5px;
+  color: var(--text-primary);
+}
+
+.strat-group-membership {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-primary);
+  padding: 1px 6px;
+  border: 1px solid rgba(217, 119, 87, 0.35);
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.strat-group-members {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* Temporal + profit pool cards share style */
+.temporal-card,
+.profit-pool-card {
+  background: rgba(198, 162, 122, 0.04);
+  border: 1px solid rgba(198, 162, 122, 0.18);
+  border-left: 3px solid var(--accent-secondary);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  margin-top: 18px;
+}
+
+.temporal-body,
+.profit-pool-body {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.7;
+  margin-top: 6px;
+}
+
+/* Memo contribution — small, subdued box at bottom of pane */
+.memo-contribution-card {
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px dashed var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-top: 24px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.memo-contribution-card .pane-eyebrow {
+  color: var(--text-tertiary);
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+  border-bottom-color: var(--glass-border);
+  border-bottom-style: dashed;
+}
+
+/* --- Responsive tightening --- */
+@media (max-width: 900px) {
+  .framework-card-head-v2 { flex-wrap: wrap; }
+  .framework-level { margin-left: 0; }
+  .force-row-v2.force-determinative::after { position: static; display: inline-block; margin-left: 8px; }
+  .rejected-row { grid-template-columns: 1fr; gap: 4px; }
+}

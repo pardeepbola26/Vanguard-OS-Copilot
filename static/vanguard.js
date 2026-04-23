@@ -800,12 +800,14 @@ function renderEnright(data) {
     `;
 }
 
+// ============================================================
+// v2 Frameworks renderer — selected + rejected + cross-framework insight
+// ============================================================
 function renderFrameworks(data) {
     const host = $("frameworksContent");
     if (!host) return;
 
     try { host.dataset.structured = JSON.stringify(data); } catch {}
-
     if (previousOutputsForDiff) {
         const prev = previousOutputsForDiff["frameworksContent"];
         if (prev != null && contentFingerprint(prev) !== contentFingerprint(data)) {
@@ -813,49 +815,82 @@ function renderFrameworks(data) {
         }
     }
 
-    const en = data.enright || {};
-    const selected = Array.isArray(data.selected_frameworks) ? data.selected_frameworks : [];
-    const confidence = data.confidence;
-
     const md = (txt) => (typeof marked !== "undefined" && txt ? marked.parse(txt) : (txt || ""));
+    const selected = Array.isArray(data.selected_frameworks) ? data.selected_frameworks : [];
+    const rejected = Array.isArray(data.frameworks_considered_and_rejected) ? data.frameworks_considered_and_rejected : [];
+    const crossInsight = data.cross_framework_insight;
 
-    const enrightRow = (key, label, colorVar) => {
-        if (!en[key]) return "";
-        return `
-          <div class="enright-row" style="--level-color: ${colorVar};">
-            <div class="enright-label">${label}</div>
-            <div class="enright-body">${md(en[key])}</div>
-          </div>`;
+    const categoryBadge = (cat) => {
+        const colors = {
+            competitive: "var(--accent-primary)",
+            positioning: "var(--accent-warning)",
+            operational: "var(--accent-success)",
+            cognitive: "var(--accent-secondary)",
+            temporal: "var(--text-secondary)",
+        };
+        return cat
+            ? `<span class="framework-category" style="color:${colors[cat] || 'var(--text-tertiary)'}">${cat}</span>`
+            : "";
     };
 
     host.innerHTML = `
-      ${confidence != null ? `<div class="agent-confidence"><span>Confidence</span><strong>${confidence}</strong></div>` : ""}
-
-      <div class="frameworks-section">
-        <h2 class="frameworks-section-title">Enright's 5 Levels</h2>
-        <div class="enright-ladder">
-          ${enrightRow("supranational", "Supranational", "var(--accent-secondary)")}
-          ${enrightRow("national",      "National",      "var(--accent-primary)")}
-          ${enrightRow("cluster",       "Cluster",       "var(--accent-warning)")}
-          ${enrightRow("industry",      "Industry",      "var(--accent-success)")}
-          ${enrightRow("firm",          "Firm",          "var(--text-primary)")}
+      ${crossInsight ? `
+        <div class="altitude-callout">
+          <div class="altitude-eyebrow">Cross-Framework Insight</div>
+          <div class="altitude-body">${crossInsight}</div>
         </div>
-      </div>
+      ` : ""}
 
       ${selected.length ? `
         <div class="frameworks-section">
-          <h2 class="frameworks-section-title">Auto-selected Frameworks</h2>
-          <div class="framework-cards">
+          <div class="pane-eyebrow">Selected Frameworks (2-3 that genuinely illuminate this)</div>
+          <div class="framework-cards-v2">
             ${selected.map(fw => `
-              <div class="framework-card">
-                <div class="framework-card-head">
-                  <span class="framework-name">${fw.name || "Framework"}</span>
-                  <span class="framework-why">${fw.why_chosen || ""}</span>
+              <div class="framework-card-v2">
+                <div class="framework-card-head-v2">
+                  <span class="framework-name-v2">${fw.name || "Framework"}</span>
+                  ${categoryBadge(fw.category)}
+                  ${fw.enright_level ? `<span class="framework-level">${fw.enright_level}</span>` : ""}
                 </div>
-                <div class="framework-analysis">${md(fw.analysis || "")}</div>
+                ${fw.why_this_framework ? `
+                  <div class="framework-why-v2"><strong>Why this framework:</strong> ${fw.why_this_framework}</div>
+                ` : ""}
+                ${fw.application ? `
+                  <div class="framework-application">${md(fw.application)}</div>
+                ` : ""}
+                ${fw.sharpest_insight ? `
+                  <div class="framework-insight">
+                    <div class="framework-insight-label">Sharpest Insight</div>
+                    <div class="framework-insight-body">${fw.sharpest_insight}</div>
+                  </div>
+                ` : ""}
+                ${fw.what_it_misses ? `
+                  <div class="framework-misses"><strong>What it misses:</strong> ${fw.what_it_misses}</div>
+                ` : ""}
               </div>
             `).join("")}
           </div>
+        </div>
+      ` : ""}
+
+      ${rejected.length ? `
+        <div class="frameworks-section">
+          <div class="pane-eyebrow">Considered and Rejected</div>
+          <div class="frameworks-rejected">
+            ${rejected.map(r => `
+              <div class="rejected-row">
+                <span class="rejected-name">${r.name || "?"}</span>
+                <span class="rejected-why">${r.why_rejected || ""}</span>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      ` : ""}
+
+      ${data.memo_contribution ? `
+        <div class="memo-contribution-card">
+          <div class="pane-eyebrow">Memo Contribution</div>
+          <div>${md(data.memo_contribution)}</div>
         </div>
       ` : ""}
 
@@ -863,12 +898,14 @@ function renderFrameworks(data) {
     `;
 }
 
+// ============================================================
+// v2 Market Forces renderer — rich Porter dynamics + strategic groups + temporal shift
+// ============================================================
 function renderMarketForces(data) {
     const host = $("marketForcesContent");
     if (!host) return;
 
     try { host.dataset.structured = JSON.stringify(data); } catch {}
-
     if (previousOutputsForDiff) {
         const prev = previousOutputsForDiff["marketForcesContent"];
         if (prev != null && contentFingerprint(prev) !== contentFingerprint(data)) {
@@ -877,52 +914,141 @@ function renderMarketForces(data) {
     }
 
     const forces = Array.isArray(data.forces) ? data.forces : [];
-    const mdet = data.most_determinative || {};
+    const md = (txt) => (typeof marked !== "undefined" && txt ? marked.parse(txt) : (txt || ""));
 
-    const arrow = (d) => ({ worsening: "↑", improving: "↓", stable: "→" }[d] || "·");
-    const arrowColor = (d) => ({ worsening: "var(--accent-danger)", improving: "var(--accent-success)", stable: "var(--text-secondary)" }[d] || "var(--text-tertiary)");
-    const barColor = (intensity) => {
-        if (intensity >= 4) return "var(--accent-danger)";
-        if (intensity >= 3) return "var(--accent-warning)";
+    const prettifyForceName = (name) => {
+        if (!name) return "?";
+        return name
+            .replace(/_/g, " ")
+            .replace(/\b\w/g, c => c.toUpperCase())
+            .replace(/\bOf\b/g, "of")
+            .replace(/\bAmong\b/g, "among");
+    };
+
+    const trajectoryArrow = (t) => ({ intensifying: "↑", weakening: "↓", stable: "→" }[t] || "·");
+    const trajectoryColor = (t) => ({
+        intensifying: "var(--accent-danger)",
+        weakening: "var(--accent-success)",
+        stable: "var(--text-secondary)",
+    }[t] || "var(--text-tertiary)");
+    const barColor = (i) => {
+        if (i >= 4) return "var(--accent-danger)";
+        if (i >= 3) return "var(--accent-warning)";
         return "var(--accent-success)";
     };
-    const isDeterminative = (name) => name && mdet.force && name.toLowerCase() === mdet.force.toLowerCase();
+
+    const mostDeterm = data.most_determinative || "";
+    const secondary = data.secondary_determinative || "";
+    const isDeterminative = (n) => {
+        if (!n || !mostDeterm) return false;
+        const a = String(n).toLowerCase().replace(/_/g, " ");
+        const b = String(mostDeterm).toLowerCase().replace(/_/g, " ");
+        return a === b || a.includes(b) || b.includes(a);
+    };
+
+    const forceCard = (f) => {
+        const intensity = Number(f.intensity) || 0;
+        const pct = Math.max(4, (intensity / 5) * 100);
+        const determClass = isDeterminative(f.name) ? "force-determinative" : "";
+        return `
+          <div class="force-row-v2 ${determClass}">
+            <div class="force-head-v2">
+              <div class="force-name-v2">${prettifyForceName(f.name)}</div>
+              <div class="force-meta">
+                <span class="force-score-v2">${intensity}/5</span>
+                <span class="force-arrow-v2" style="color:${trajectoryColor(f.intensity_trajectory)}">${trajectoryArrow(f.intensity_trajectory)}</span>
+                ${f.time_horizon ? `<span class="force-horizon">${f.time_horizon}</span>` : ""}
+              </div>
+            </div>
+            <div class="force-bar-track-v2">
+              <div class="force-bar-v2" style="width:${pct}%; background:${barColor(intensity)}"></div>
+            </div>
+            ${f.specific_evidence ? `
+              <div class="force-evidence">
+                <span class="force-evidence-label">Evidence:</span> ${f.specific_evidence}
+              </div>
+            ` : ""}
+            ${f.implication ? `
+              <div class="force-implication">
+                <span class="force-implication-label">Implication:</span> ${f.implication}
+              </div>
+            ` : ""}
+          </div>
+        `;
+    };
+
+    // Generic strategy posture card
+    const posture = data.generic_strategy_assessment || "";
+    const stuckRisk = data.stuck_in_middle_risk || "";
+    const postureCard = posture ? `
+      <div class="posture-card ${posture === 'stuck_in_middle' ? 'posture-warning' : ''}">
+        <div class="pane-eyebrow">Generic Strategy Posture</div>
+        <div class="posture-value">${posture.replace(/_/g, " ")}</div>
+        ${stuckRisk ? `<div class="posture-risk">${stuckRisk}</div>` : ""}
+      </div>
+    ` : "";
+
+    // Strategic groups
+    const groups = Array.isArray(data.strategic_groups) ? data.strategic_groups : [];
+    const groupsCard = groups.length ? `
+      <div class="strat-groups-card">
+        <div class="pane-eyebrow">Strategic Groups</div>
+        <div class="strat-groups-list">
+          ${groups.map(g => `
+            <div class="strat-group-row">
+              <div class="strat-group-name">
+                ${g.group_name || "?"}
+                ${g.firm_membership ? `<span class="strat-group-membership">${g.firm_membership.replace(/_/g, ' ')}</span>` : ""}
+              </div>
+              ${(g.members && g.members.length) ? `
+                <div class="strat-group-members">${g.members.join(" · ")}</div>
+              ` : ""}
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    ` : "";
 
     host.innerHTML = `
-      ${data.confidence != null ? `<div class="agent-confidence"><span>Confidence</span><strong>${data.confidence}</strong></div>` : ""}
-
-      <div class="forces-panel">
-        <div class="forces-panel-title">Porter Forces (intensity 1-5, direction next 24 mo)</div>
-        <div class="forces-list">
-          ${forces.map(f => {
-            const intensity = Number(f.intensity) || 0;
-            const pct = Math.max(4, (intensity / 5) * 100);
-            const determ = isDeterminative(f.name) ? "force-determinative" : "";
-            return `
-              <div class="force-row ${determ}">
-                <div class="force-head">
-                  <span class="force-name">${f.name || "?"}</span>
-                  <span class="force-score">${intensity}/5</span>
-                  <span class="force-arrow" style="color:${arrowColor(f.direction)}">${arrow(f.direction)}</span>
-                </div>
-                <div class="force-bar-track">
-                  <div class="force-bar" style="width:${pct}%; background:${barColor(intensity)}"></div>
-                </div>
-                <div class="force-note">${f.note || ""}</div>
-              </div>
-            `;
-          }).join("")}
+      <div class="forces-panel-v2">
+        <div class="pane-eyebrow">Porter Forces — intensity (1-5) × trajectory (next horizon)</div>
+        <div class="forces-list-v2">
+          ${forces.map(forceCard).join("")}
         </div>
       </div>
 
-      ${mdet.force ? `
-        <div class="forces-callout">
-          <div class="forces-callout-label">Most Determinative Force</div>
-          <div class="forces-callout-body"><strong>${mdet.force}</strong> — ${mdet.why || ""}</div>
+      ${mostDeterm ? `
+        <div class="forces-callout-v2">
+          <div class="forces-callout-label-v2">Most Determinative Force</div>
+          <div class="forces-callout-body-v2"><strong>${prettifyForceName(mostDeterm)}</strong></div>
+          ${secondary ? `<div class="forces-callout-secondary"><span>Secondary:</span> ${prettifyForceName(secondary)}</div>` : ""}
         </div>
       ` : ""}
 
-      ${data.implications ? `<div class="forces-implications"><strong>Implications:</strong> ${data.implications}</div>` : ""}
+      ${postureCard}
+
+      ${data.temporal_dynamics ? `
+        <div class="temporal-card">
+          <div class="pane-eyebrow">Temporal Dynamics (18-24 mo)</div>
+          <div class="temporal-body">${md(data.temporal_dynamics)}</div>
+        </div>
+      ` : ""}
+
+      ${data.industry_profit_pool_shift ? `
+        <div class="profit-pool-card">
+          <div class="pane-eyebrow">Industry Profit Pool Shift</div>
+          <div class="profit-pool-body">${md(data.industry_profit_pool_shift)}</div>
+        </div>
+      ` : ""}
+
+      ${groupsCard}
+
+      ${data.memo_contribution ? `
+        <div class="memo-contribution-card">
+          <div class="pane-eyebrow">Memo Contribution</div>
+          <div>${md(data.memo_contribution)}</div>
+        </div>
+      ` : ""}
 
       ${data.error ? `<div class="financials-error">${data.error}</div>` : ""}
     `;
