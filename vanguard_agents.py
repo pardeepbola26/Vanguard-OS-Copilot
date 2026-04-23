@@ -993,7 +993,7 @@ PROFIT POOL SHIFT: Where is value migrating? NAME the winning/losing categories.
 ✅ GOOD temporal: "Over 18 months: threat of substitutes escalates (GPT-5 expected Q2 2025, 10x context window collapses competitive moat around long-call analysis); buyer power rises as Q3 2025 renewals cycle through with new AI-budget rationalization; rivalry PEAKS then drops as 2-3 underfunded competitors (Wingman, Avoma) run out of runway by mid-2026. Most determinative shifts from rivalry → substitutes at month 12."
 
 ❌ BAD strategic_group: "A group of similar competitors."
-✅ GOOD strategic_group: "group_name: 'Enterprise CI incumbents', members: ['Gong','Chorus/ZoomInfo','Clari'], axes: {price: '$500-1200/user/mo', integration_depth: 'deep SFDC/MSFT native', deployment: 'enterprise sales motion'}, firm_membership: 'caught_between_groups' — the firm is priced like enterprise ($180/user) but sells like SMB (self-serve with lightweight onboarding)."
+✅ GOOD strategic_group: "group_name: 'Enterprise CI incumbents', members: ['Gong','Chorus/ZoomInfo','Clari'], axes: {{price: '$500-1200/user/mo', integration_depth: 'deep SFDC/MSFT native', deployment: 'enterprise sales motion'}}, firm_membership: 'caught_between_groups' — the firm is priced like enterprise ($180/user) but sells like SMB (self-serve with lightweight onboarding)."
 
 ❌ BAD profit_pool: "Value is moving in the industry."
 ✅ GOOD profit_pool: "Profit pool is migrating from 'conversation transcription' (commoditized by GenAI APIs at $0.006/minute) to 'revenue intelligence layered on top of CRM workflows' — Gong captured 60% of this via Salesforce partnership Oct 2024. Firms without native CRM integration by end of 2025 are locked out of where margin still exists."
